@@ -62,9 +62,24 @@ public enum PDFTextExtractor {
             // Entries whose heading could not be told apart from the one before share its start;
             // their text stays with that section.
             let kept = chapters.indices.filter { $0 == 0 || starts[$0] > starts[$0 - 1] }
+            // The section's title shows above its text, so the heading it starts with, as "3.1
+            // Sorting theory" or "Chapter 3" over "Sorting", is not read again.
+            func letters(_ value: String) -> String { value.lowercased().filter(\.isLetter) }
+            func heading(_ line: String, of title: String) -> Bool {
+                let line = line.hasPrefix(PDFLayoutAnalyzer.smallPrint) ? String(line.dropFirst(PDFLayoutAnalyzer.smallPrint.count)) : line
+                guard !PDFLayoutAnalyzer.isMarker(line), line.count <= title.count + 16 else { return false }
+                let own = letters(line), wanted = letters(title)
+                return !wanted.isEmpty && (own == wanted || own == "chapter" + wanted || own == "part" + wanted)
+                    || line.range(of: #"^(Chapter|Part)\s+([0-9]+|[IVXL]+)$"#, options: .regularExpression) != nil
+            }
             sections = kept.enumerated().map { position, index in
                 let end = position + 1 < kept.count ? starts[kept[position + 1]] : (pages.count, 0)
-                return BookSection(title: chapters[index].title, text: text(from: starts[index], to: end))
+                var start = starts[index]
+                for _ in 0..<2 where start.page < pageLines.count && start.line < pageLines[start.page].count
+                    && (start.page, start.line) < (end.0, end.1) && heading(pageLines[start.page][start.line], of: chapters[index].title) {
+                    start.line += 1
+                }
+                return BookSection(title: chapters[index].title, text: text(from: start, to: end))
             }
         }
         let readable = placingFigures(sections, figures: figures)
