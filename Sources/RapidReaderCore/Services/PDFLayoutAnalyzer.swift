@@ -275,7 +275,12 @@ enum PDFLayoutAnalyzer {
             if lines[top].text.hasSuffix(":"), words >= 2, lines[top].bounds.minX < rest - 8 {
                 lines[top].block = nil
                 lines[top].kind = nil
-                blocks[index].rect = members.dropFirst().reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+                // The listing keeps its frame's width and starts under the sentence, where it is read.
+                let below = members.dropFirst().reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+                let rect = blocks[index].rect
+                let top = min(rect.maxY, lines[top].bounds.minY - 0.5, below.maxY + 6)
+                blocks[index].rect = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: max(below.height, top - rect.minY))
+                blocks[index].firstLine = members.dropFirst().min()
             }
         }
         // A statement inside a listing's frame, such as "if (n < 2) return false;" that read as
@@ -692,7 +697,7 @@ enum PDFLayoutAnalyzer {
                     // Ink reaching much further, or holding another line's letters, belongs to that line,
                     // as the "is" under "n− k". Line boxes can be far taller than their letters, so the
                     // letters themselves are checked.
-                    let reach = usualHeight * 0.4
+                    let reach = usualHeight * 0.55
                     func onlyOwn(_ slice: CGRect) -> Bool {
                         !lines.indices.contains { other in
                             guard other != index, !(chain?.pieces.contains(other) ?? false), lines[other].bounds.intersects(slice),
@@ -704,13 +709,36 @@ enum PDFLayoutAnalyzer {
                             }
                         }
                     }
-                    if rect.maxY > ceiling, rect.maxY < min(above - usualHeight * 0.25, ceiling + reach), ink.blankRow(above: true, of: rect),
+                    // For a stacked expression, as a binomial, the middle of the next line's box is a guide
+                    // only; its letters are what may not be taken.
+                    let stacked = rect.height >= usualHeight * 1.25
+                    if rect.maxY > ceiling, rect.maxY < min(stacked ? above : above - usualHeight * 0.25, ceiling + (stacked ? reach : usualHeight * 0.4)), ink.blankRow(above: true, of: rect),
                        onlyOwn(CGRect(x: rect.minX, y: ceiling, width: rect.width, height: rect.maxY - ceiling)) { top = rect.maxY }
-                    if rect.minY < floor, rect.minY > max(below + usualHeight * 0.25, floor - reach), ink.blankRow(above: false, of: rect),
+                    if rect.minY < floor, rect.minY > max(below + usualHeight * 0.25, floor - usualHeight * 0.4), ink.blankRow(above: false, of: rect),
                        onlyOwn(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: floor - rect.minY)) { bottom = rect.minY }
                     if top > ceiling || bottom < floor {
                         let wide = ink.extended(ink.extended(CGRect(x: rect.minX, y: bottom, width: rect.width, height: top - bottom), right: true, gap: 1.6), right: false, gap: 1.6)
-                        let left = max(wide.minX, rect.minX - 4, (expression.previousEnd ?? -.infinity) + 0.5)
+                        var left = max(wide.minX, rect.minX - 4, (expression.previousEnd ?? -.infinity) + 0.5)
+                        // PDFKit's box for the word before can run over the space and over the big
+                        // bracket set there, as the "(" of a binomial after "is": a narrow glyph just
+                        // left of a stacked expression, as tall as the bracket closing it, is that bracket.
+                        func extent(_ run: Range<CGFloat>, widest: CGFloat = 3.5) -> (low: CGFloat, high: CGFloat)? {
+                            let column = CGRect(x: run.lowerBound, y: bottom, width: run.upperBound - run.lowerBound, height: top - bottom)
+                            guard run.upperBound - run.lowerBound <= widest, let high = ink.highestInk(in: column), let low = ink.lowestInk(in: column) else { return nil }
+                            return (low, high)
+                        }
+                        let side = CGRect(x: rect.minX - 5, y: bottom, width: 5.5, height: top - bottom)
+                        let closing = ink.glyphColumns(in: CGRect(x: rect.maxX - 6, y: bottom, width: 6, height: top - bottom)).compactMap { extent($0, widest: 6) }
+                            .max { $0.high - $0.low < $1.high - $1.low }
+                        // It reaches as high and as low as the bracket closing the expression, which holds
+                        // two rows between them, as a binomial does.
+                        let glyphs = ink.finer(page)?.glyphs(in: CGRect(x: rect.minX + 1, y: bottom, width: max(0, rect.width - 7), height: top - bottom), stacking: false) ?? []
+                        let rows = glyphs.contains { upper in glyphs.contains { upper.bottom > $0.top + 0.5 } }
+                        if top - bottom >= usualHeight * 1.25, rows, let bracket = ink.glyphColumns(in: side).last(where: { $0.upperBound <= rect.minX + 0.5 }),
+                           let opening = extent(bracket), let closing, opening.high - opening.low >= usualHeight * 0.8,
+                           abs(opening.high - closing.high) <= 2.5, abs(opening.low - closing.low) <= 2.5 {
+                            left = min(left, bracket.lowerBound - 0.5)
+                        }
                         let right = min(wide.maxX, rect.maxX + 4, (expression.nextStart ?? .infinity) - 0.5)
                         if right > left { rect = CGRect(x: min(rect.minX, left), y: rect.minY, width: max(rect.maxX, right) - min(rect.minX, left), height: rect.height) }
                     }
@@ -3462,7 +3490,7 @@ private struct FineInk {
     /// The glyphs in `area` as runs of connected ink, left to right, with where their ink ends
     /// below and above. Pieces stacked over one another, as the dot of an "i" or the bars of "=",
     /// are one glyph.
-    func glyphs(in area: CGRect) -> [(span: Range<CGFloat>, bottom: CGFloat, top: CGFloat)] {
+    func glyphs(in area: CGRect, stacking: Bool = true) -> [(span: Range<CGFloat>, bottom: CGFloat, top: CGFloat)] {
         let left = max(0, Int(((area.minX - rect.minX) * scale).rounded())), right = min(width - 1, Int(((area.maxX - rect.minX) * scale).rounded()) - 1)
         let top = max(0, Int(((rect.maxY - area.maxY) * scale).rounded())), bottom = min(height - 1, Int(((rect.maxY - area.minY) * scale).rounded()) - 1)
         guard left <= right, top <= bottom else { return [] }
@@ -3491,7 +3519,7 @@ private struct FineInk {
         pieces.sort { $0.minX < $1.minX }
         var merged: [(minX: Int, maxX: Int, minRow: Int, maxRow: Int)] = []
         for piece in pieces {
-            if let last = merged.last, min(last.maxX, piece.maxX) - max(last.minX, piece.minX) + 1 >= (min(last.maxX - last.minX, piece.maxX - piece.minX) + 1) / 2 {
+            if stacking, let last = merged.last, min(last.maxX, piece.maxX) - max(last.minX, piece.minX) + 1 >= (min(last.maxX - last.minX, piece.maxX - piece.minX) + 1) / 2 {
                 merged[merged.count - 1] = (min(last.minX, piece.minX), max(last.maxX, piece.maxX), min(last.minRow, piece.minRow), max(last.maxRow, piece.maxRow))
             } else {
                 merged.append(piece)
