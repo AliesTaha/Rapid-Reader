@@ -1235,9 +1235,9 @@ enum PDFLayoutAnalyzer {
                     }
                 }
             }
-            // Glyphs that touch before a squared bracket, as the "5)" of "(10⁵)²", are told apart by where PDFKit
+            // Glyphs that touch, as the "5)" of "(10⁵)²" or the "09" of "10⁹", are told apart by where PDFKit
             // puts each character, measured in its middle so a neighbour's ink stays out.
-            if glyphs.count != text.count, String(text).range(of: #"\)\d+[,.;:]?$"#, options: .regularExpression) != nil {
+            if glyphs.count != text.count, String(text).range(of: #"\)\d+[,.;:]?$|^\D{0,8}10\d{1,2}[,.;:)”]*$"#, options: .regularExpression) != nil {
                 let start = lineRange.location + leading + local.location
                 // Their widths are right, but the run can sit off where the token is drawn.
                 let spans = (0..<local.length).map { page.characterBounds(at: start + $0) }
@@ -1296,8 +1296,14 @@ enum PDFLayoutAnalyzer {
             // Raised characters that open a token mark a footnote on the word they precede, as in
             // "¹Cornell"; before a digit, as the "1" of "17M" would be, they are misread ink.
             if raised.contains(text.startIndex), let first = text.indices.first(where: { !raised.contains($0) }), !text[first].isLetter { continue }
+            var lifted = raised
+            // A two-figure power of ten, as "10³⁸", is raised whole when its last figure is.
+            if let ten = String(text).range(of: #"10\d\d"#, options: .regularExpression) {
+                let start = String(text).distance(from: String(text).startIndex, to: ten.lowerBound)
+                if lifted.contains(start + 3), !lifted.contains(start + 2) { lifted.append(start + 2) }
+            }
             var written = text
-            for index in raised { written[index] = superscripts[text[index]]! }
+            for index in lifted { written[index] = superscripts[text[index]]! }
             result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
             break
           }

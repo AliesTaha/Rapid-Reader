@@ -330,6 +330,7 @@ public enum PDFTextExtractor {
         droppingMarginContents(&kept)
         kept = kept.map(tidyingListings)
         movingNotes(&kept)
+        movingPageTopCaptions(&kept)
         return kept.map { page in
             // Ligature glyphs, as in "Eﬃciency", are spelled out.
             let joined = page.map(plain).joined(separator: "\n")
@@ -410,6 +411,39 @@ public enum PDFTextExtractor {
                 }
                 index = end
             }
+        }
+    }
+
+    /// A figure or table set at the top of a page, with its caption, comes between the halves of
+    /// a sentence that runs on from the page before, as "…translation on the" + "Table 3: …" +
+    /// "development set". It is read once that sentence ends.
+    static func movingPageTopCaptions(_ pages: inout [[String]]) {
+        let mark = PDFLayoutAnalyzer.smallPrint
+        func plain(_ line: String) -> String { line.hasPrefix(mark) ? String(line.dropFirst(mark.count)) : line }
+        func marker(_ line: String) -> Bool { PDFLayoutAnalyzer.isMarker(plain(line).trimmingCharacters(in: .whitespaces)) }
+        func caption(_ line: String) -> Bool { plain(line).range(of: #"^(Figure|Table)\s*\d+(\.\d+)*[a-z]?\s*[:.]"#, options: .regularExpression) != nil }
+        func endsSentence(_ line: String) -> Bool { plain(line).range(of: #"[.!?]["”’)]?$"#, options: .regularExpression) != nil }
+        for page in pages.indices.dropFirst() {
+            guard let previous = pages[page - 1].last(where: { !marker($0) && !$0.hasPrefix(mark) }), !endsSentence(previous),
+                  previous.range(of: #"[:;]$"#, options: .regularExpression) == nil else { continue }
+            let lines = pages[page]
+            // Pictures and their caption, up to the line where the sentence goes on in lowercase.
+            var end = 0, sawCaption = false
+            while end < lines.count {
+                let line = plain(lines[end]).trimmingCharacters(in: .whitespaces)
+                if marker(lines[end]) || lines[end].hasPrefix(mark) { end += 1; continue }
+                if caption(lines[end]) { sawCaption = true; end += 1; continue }
+                // The caption runs on over lines of its own; the body goes on in lowercase after a
+                // picture or a caption's full stop.
+                guard sawCaption, end > 0, !line.isEmpty else { break }
+                if line.first?.isLowercase == true, marker(lines[end - 1]) || endsSentence(lines[end - 1]) { break }
+                end += 1
+            }
+            guard sawCaption, end < lines.count, end <= 12, plain(lines[end]).first?.isLowercase == true,
+                  let close = lines.indices.first(where: { $0 >= end && !marker(lines[$0]) && !lines[$0].hasPrefix(mark) && endsSentence(lines[$0]) }) else { continue }
+            let block = Array(lines[..<end])
+            pages[page].insert(contentsOf: block, at: close + 1)
+            pages[page].removeSubrange(0..<end)
         }
     }
 
