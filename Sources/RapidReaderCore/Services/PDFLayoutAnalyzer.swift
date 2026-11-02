@@ -1196,6 +1196,8 @@ enum PDFLayoutAnalyzer {
         func candidate(_ token: Substring) -> Bool {
             token.contains(where: \.isNumber) || (2...7).contains(token.count) && token.contains(where: \.isLetter)
                 && !isDictionaryWord(String(token.filter(\.isLetter)).lowercased()) && token.filter(\.isLetter).count <= 4
+                // A logarithm's base, as the "k" of "logₖ(x)", comes before its argument.
+                || token.range(of: #"^\W*log[a-z]\("#, options: .regularExpression) != nil
         }
         guard line.split(separator: " ").contains(where: candidate), selection.numberOfTextRanges(on: page) == 1, let raw = selection.string,
               raw.trimmingCharacters(in: .whitespacesAndNewlines) == line else { return [:] }
@@ -1205,7 +1207,7 @@ enum PDFLayoutAnalyzer {
         // A frame's rule just above or below the line would join every column into one.
         var box = ink.withoutRules(selection.bounds(for: page).insetBy(dx: 0, dy: -2))
         let subscripts: [Character: Character] = ["0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
-            "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ"]
+            "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ", "−": "₋", "+": "₊"]
         let superscripts: [Character: Character] = ["/": "ᐟ", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
             "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ"]
         // The line's baseline is where most of its glyphs end; subscripts and old-style figures
@@ -1329,7 +1331,10 @@ enum PDFLayoutAnalyzer {
                     guard text[index].isNumber || text[index].isLetter && !"gjpqyQ".contains(text[index]) else { return nil }
                     return bottoms[index]
                 }
-                guard resting.count >= 2 else { continue }
+                // A letter with a descender, as the "y" of "y₁", has no glyph on the baseline beside
+                // its index; the line's baseline and type size are the measure then.
+                let hanging = text.count >= 2 && "gpqy".contains(text[0]) && text[1].isNumber
+                guard resting.count >= 2 || hanging else { continue }
                 // An exponent rides on something that sits on the baseline, as the "2" of "2³¹". Its
                 // height is the measure. Ink from the lines above can reach into a letter's columns, so
                 // digits are preferred, at their middle height; letters run from x-height to capitals,
@@ -1337,10 +1342,10 @@ enum PDFLayoutAnalyzer {
                 func letter(_ index: Int) -> Bool { text[index].isNumber || text[index].isLetter }
                 let seated = text.indices.filter { letter($0) && bottoms[$0].map { abs($0 - level) <= 1 } == true }
                 let digits = seated.filter { text[$0].isNumber }
-                guard !seated.isEmpty else { continue }
+                guard !seated.isEmpty || hanging else { continue }
                 // Letters of x-height alone, as the "n" of "n³", understate it; a figure is about two
                 // thirds of the type size.
-                let seatedHeight = digits.isEmpty ? max(seated.map(height).max()!, size * 0.65) : digits.map(height).sorted()[digits.count / 2]
+                let seatedHeight = digits.isEmpty ? max(seated.map(height).max() ?? 0, size * 0.65) : digits.map(height).sorted()[digits.count / 2]
                 let seatedTop = digits.isEmpty ? max(seated.compactMap { tops[$0] }.max() ?? 0, level + size * 0.65) : digits.compactMap { tops[$0] }.sorted()[digits.count / 2]
                 // A raised character stands clear of the baseline; an operator on the maths axis, as the
                 // minus of "is −2³¹", stands off it too, so a raised one must stand higher.
@@ -1361,6 +1366,12 @@ enum PDFLayoutAnalyzer {
                     // "Gₙⱼ", when it stays as low as the letter before it.
                     for index in text.indices where "jp".contains(text[index]) && lowered.contains(index - 1) {
                         if let top = tops[index], let before = tops[index - 1], top <= before + seatedHeight * 0.2 { lowered.append(index) }
+                    }
+                    // An index can be a sum, as the "n−1" of "Cₙ₋₁"; its sign sits on the index's own axis.
+                    for index in text.indices where "−+".contains(text[index]) && lowered.contains(index - 1) && index + 1 < text.count
+                        && subscripts[text[index + 1]] != nil {
+                        if lowered.contains(index + 1) { lowered.append(index); continue }
+                        if let bottom = bottoms[index + 1], let top = tops[index + 1], bottom <= level - 0.9, top < seatedTop - seatedHeight * 0.3 { lowered += [index, index + 1] }
                     }
                     // A word, as "nim", has no subscript letters, whatever its last letter measures.
                     let word = String(text.filter(\.isLetter))
