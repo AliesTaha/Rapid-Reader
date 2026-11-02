@@ -1227,7 +1227,8 @@ enum PDFLayoutAnalyzer {
         // A letter can be raised too, as the "k" of "O(nᵏ)" or the "n" of "xⁿ"; such tokens are no words.
         func candidate(_ token: Substring) -> Bool {
             token.contains(where: \.isNumber) || (2...7).contains(token.count) && token.contains(where: \.isLetter)
-                && !isDictionaryWord(String(token.filter(\.isLetter)).lowercased()) && token.filter(\.isLetter).count <= 4
+                && (!isDictionaryWord(String(token.filter(\.isLetter)).lowercased()) || token.filter(\.isLetter).count == 2 && token.filter(\.isLetter).allSatisfy(\.isUppercase))
+                && token.filter(\.isLetter).count <= 4
                 // A logarithm's base, as the "k" of "logₖ(x)", comes before its argument.
                 || token.range(of: #"^\W*(log|sum|min|max)[a-z]\("#, options: .regularExpression) != nil
         }
@@ -1241,7 +1242,8 @@ enum PDFLayoutAnalyzer {
         let subscripts: [Character: Character] = ["0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
             "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ", "q": "\u{E002}", "−": "₋", "+": "₊"]
         let superscripts: [Character: Character] = ["/": "ᐟ", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
-            "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ"]
+            "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ",
+            "A": "ᴬ", "B": "ᴮ", "D": "ᴰ", "E": "ᴱ", "G": "ᴳ", "H": "ᴴ", "I": "ᴵ", "J": "ᴶ", "K": "ᴷ", "L": "ᴸ", "M": "ᴹ", "N": "ᴺ", "O": "ᴼ", "P": "ᴾ", "R": "ᴿ", "T": "ᵀ", "U": "ᵁ", "V": "ⱽ", "W": "ᵂ"]
         // The line's baseline is where most of its glyphs end; subscripts and old-style figures
         // such as 7 and 9 reach below it, so the lowest glyph would mislead. A line full of indices,
         // commas and braces, as "B = {x₁, x₂, ¬x₃}", can end more glyphs below its baseline than on
@@ -1398,7 +1400,7 @@ enum PDFLayoutAnalyzer {
                 // minus of "is −2³¹", stands off it too, so a raised one must stand higher.
                 var raised = text.indices.filter { index in
                     guard let bottom = bottoms[index] else { return false }
-                    return letter(index) ? bottom >= level + max(1.5, seatedHeight * 0.3)
+                    return letter(index) || text[index] == "|" ? bottom >= level + max(1.5, seatedHeight * 0.3)
                         : "+−-=()".contains(text[index]) && bottom >= level + seatedHeight * 0.55
                 }
                 // A subscript, as the "1" of "a1" or the "i" of "xi", sits below the baseline and stays
@@ -1447,12 +1449,15 @@ enum PDFLayoutAnalyzer {
                 }
                 // Letters drawn finer are read for subscripts only; a raised one, as the "e" of an
                 // inline "Pᵉ", is mathematics the line's crop shows.
-                if measured != nil, !text.contains(where: \.isNumber) { continue }
+                if measured != nil, !text.contains(where: \.isNumber), String(text).range(of: #"^O\("#, options: .regularExpression) == nil { continue }
                 // It is set smaller and reaches above it, or, measured in whole points, as high when it
                 // stands well clear of the baseline; a speck of ink from the line above is not a character.
+                // An exponent Unicode cannot write, as the "|S|" of "2^|S|", is written after a caret
+                // when it ends the token.
+                let suffix = raised.sorted() == Array((text.count - raised.count)..<text.count)
                 guard !raised.isEmpty, raised.contains(where: letter), raised.allSatisfy({ index in
                     guard let bottom = bottoms[index], let top = tops[index] else { return false }
-                    return superscripts[text[index]] != nil && (!letter(index) || height(index) <= seatedHeight * (digits.isEmpty ? 0.85 : 0.8) && height(index) >= seatedHeight * 0.35
+                    return (superscripts[text[index]] != nil || suffix && (text[index].isASCII && text[index].isUppercase || text[index] == "|")) && (!letter(index) || height(index) <= seatedHeight * (digits.isEmpty ? 0.85 : 0.8) && height(index) >= seatedHeight * 0.35
                         && (top > seatedTop + 0.5 || top > seatedTop - 0.5 && bottom >= level + seatedHeight * 0.45))
                 }) else { continue }
                 // An operator between two raised characters, as the "/" of "2ⁿᐟ²" or the "−" of
@@ -1463,7 +1468,7 @@ enum PDFLayoutAnalyzer {
                 }
                 // A raised letter rides on a base, as the "k" of "nᵏ"; one that opens the token, as
                 // the "x" of "xᵢ)" over its subscript, only looks raised.
-                if raised.contains(where: { text[$0].isLetter && ($0 == 0 || !(text[$0 - 1].isLetter || text[$0 - 1].isNumber || text[$0 - 1] == ")")) }) { continue }
+                if raised.contains(where: { text[$0].isLetter && ($0 == 0 || !(text[$0 - 1].isLetter || text[$0 - 1].isNumber || text[$0 - 1] == ")" || raised.contains($0 - 1))) }) { continue }
                 // An exponent that goes on unraised, as the "/" of "2^(n/2)" or the "−" of "2^(n−1)", is
                 // only partly seen; the token is left as it is.
                 if raised.contains(where: { index in
@@ -1484,7 +1489,11 @@ enum PDFLayoutAnalyzer {
                     if lifted.contains(start + 3), !lifted.contains(start + 2) { lifted.append(start + 2) }
                 }
                 var written = text
-                for index in lifted { written[index] = superscripts[text[index]]! }
+                if lifted.allSatisfy({ superscripts[text[$0]] != nil }) {
+                    for index in lifted { written[index] = superscripts[text[index]]! }
+                } else {
+                    written = Array(text[..<lifted.min()!]) + ["^"] + Array(text[lifted.min()!...])
+                }
                 let rewritten = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
                 if measured != nil, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
                 result[String(line[whole])] = rewritten
