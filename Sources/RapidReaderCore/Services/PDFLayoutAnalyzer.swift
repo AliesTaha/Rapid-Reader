@@ -2359,17 +2359,34 @@ enum PDFLayoutAnalyzer {
     }
 
     private static func attachTableHeaders(_ blocks: inout [Block], lines: inout [Line]) {
-        for index in blocks.indices where blocks[index].kind == .image && !blocks[index].rect.isNull {
+        // A row of a table of timings, as "10⁴ > 10.0 s 0.1 s 0.0 s", is figures and units.
+        // A cell of such a row holds a figure, a unit or a sign, as "s", ">" or "·"; a short row of
+        // a formula's table, as "g(n− 1) 2", names and counts.
+        func figures(_ text: String) -> Bool {
+            let tokens = text.split(whereSeparator: \.isWhitespace)
+            guard !tokens.contains(where: { $0.count >= 4 && isDictionaryWord(wordLetters($0).lowercased()) }) else { return false }
+            let cells = tokens.filter { $0.contains(where: \.isNumber) || $0.count <= 2 }.count
+            return tokens.count >= 3 && cells == tokens.count && tokens.filter { $0.contains(where: \.isNumber) }.count >= 2 || tokens.count <= 3
+        }
+        for index in blocks.indices where (blocks[index].kind == .image || blocks[index].kind == .formula) && !blocks[index].rect.isNull {
             let members = lines.indices.filter { lines[$0].block == index }
-            guard members.count >= 2, members.allSatisfy({ isDataRow(lines[$0].text) || lines[$0].text.split(whereSeparator: \.isWhitespace).count <= 2 }) else { continue }
+            let numbered = members.filter { lines[$0].text.contains(where: \.isNumber) }.count * 2 >= members.count
+            guard members.count >= 2, numbered,
+                  members.allSatisfy({ isDataRow(lines[$0].text) || figures(lines[$0].text) || blocks[index].kind == .image && lines[$0].text.split(whereSeparator: \.isWhitespace).count <= 2 }) else { continue }
             let rect = blocks[index].rect
             let rowHeight = members.map { lines[$0].bounds.height }.min() ?? 10
             guard let header = lines.indices.filter({ index in
                 let line = lines[index]
-                return line.block == nil && line.bounds.minY >= rect.maxY - 2 && line.bounds.minY - rect.maxY < rowHeight * 1.5
-                    && line.bounds.minX >= rect.minX - 40 && line.bounds.maxX <= rect.maxX + 40
-                    && line.text.split(whereSeparator: \.isWhitespace).count <= 8 && line.text.range(of: #"[.:;,?!]$"#, options: .regularExpression) == nil
+                return line.block == nil && !line.heading && line.bounds.minY >= rect.maxY - 2 && line.bounds.minY - rect.maxY < rowHeight * 1.5
+                    && line.bounds.minX >= rect.minX - 60 && line.bounds.maxX <= rect.maxX + 40
+                    && line.text.split(whereSeparator: \.isWhitespace).count <= 10 && line.text.range(of: #"[.:;,?!]$"#, options: .regularExpression) == nil
             }).min(by: { lines[$0].bounds.minY < lines[$1].bounds.minY }) else { continue }
+            // A formula of two rows takes a row of figures over it, as "10110 (22)" over "& 11010 (26)",
+            // not a heading of words.
+            // Over more rows, a formula's table takes a heading of words, as "function call number of
+            // calls", never a piece of a display.
+            let words = lines[header].text.split(whereSeparator: \.isWhitespace).filter { $0.count >= 3 && isDictionaryWord(wordLetters($0).lowercased()) }.count
+            if blocks[index].kind == .formula, members.count < 3 ? !figures(lines[header].text) || lines[header].text.contains(where: \.isLetter) && !isDataRow(lines[header].text) : words < 2 { continue }
             lines[header].block = index
             blocks[index].rect = rect.union(lines[header].bounds)
             blocks[index].firstLine = min(blocks[index].firstLine ?? header, header)
