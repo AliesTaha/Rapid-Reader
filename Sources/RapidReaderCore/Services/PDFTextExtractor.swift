@@ -335,6 +335,10 @@ public enum PDFTextExtractor {
             let joined = page.map(plain).joined(separator: "\n")
                 .replacingOccurrences(of: "\u{00ad}\n", with: "")
                 .replacingOccurrences(of: "\u{00ad}", with: "")
+                // Punctuation PDFKit set apart after a subscript, as in "dimension dk , and", joins
+                // the word before it; on its own it would not be read.
+                .replacingOccurrences(of: #"(?<=[\p{L}\p{N})\]}′])[ \t]+([.,;:!?])(?=\s|$)"#, with: "$1", options: .regularExpression)
+                .replacingOccurrences(of: #"(\#(PDFLayoutAnalyzer.markerPrefix)\d+)([.,;:!?])"#, with: "$1 $2", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
                 .replacingOccurrences(of: #"·\s?·\s?·"#, with: "⋯", options: .regularExpression)
                 // A web address broken after a slash goes on without a space.

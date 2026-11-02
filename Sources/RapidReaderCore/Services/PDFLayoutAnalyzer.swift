@@ -322,6 +322,17 @@ enum PDFLayoutAnalyzer {
                     }
                 }
             }
+            // A drawing the edge would cut, as the circle around a node "𝑋1", is taken whole.
+            if block.kind == .formula, let pageInk {
+                let others = lines.filter { $0.block != index && !$0.text.isEmpty }.map(\.bounds)
+                let grown = pageInk.grownVertically(pageInk.completingGlyphs(crop, left: nil, right: nil), limit: 6)
+                // Only into space no other line uses, so the next display is not half taken.
+                let strips = [CGRect(x: grown.minX, y: crop.maxY, width: grown.width, height: max(0, grown.maxY - crop.maxY)),
+                              CGRect(x: grown.minX, y: grown.minY, width: grown.width, height: max(0, crop.minY - grown.minY)),
+                              CGRect(x: grown.minX, y: grown.minY, width: max(0, crop.minX - grown.minX), height: grown.height),
+                              CGRect(x: crop.maxX, y: grown.minY, width: max(0, grown.maxX - crop.maxX), height: grown.height)].filter { $0.width > 0.5 && $0.height > 0.5 }
+                if !others.contains(where: { other in strips.contains { $0.intersects(other) } }) { crop = grown }
+            }
             let memberText = lines.filter { $0.block == index }.map(\.text).joined()
             let hollow = block.kind != .image && !memberText.contains(where: { $0.isLetter || $0.isNumber })
             guard !hollow, let image = renderPNG(of: page, rect: crop, pageBounds: pageBounds),
@@ -743,6 +754,23 @@ enum PDFLayoutAnalyzer {
                 rect = CGRect(x: rect.minX, y: max(rect.minY, floor), width: rect.width, height: min(rect.maxY, ceiling) - max(rect.minY, floor))
                 guard rect.height >= 4 else { continue }
                 rect = ink.completingGlyphs(rect, left: nil, right: nil)
+                // Labels inside a small drawing, as the "𝑋1 𝑋2" of two circled nodes, take the
+                // drawing: ink beside them that stands taller than the line.
+                let wide = ink.widened(rect)
+                if wide.width > rect.width + 2 {
+                    let sides = [CGRect(x: wide.minX, y: own.midY - lineHeight, width: rect.minX - wide.minX, height: lineHeight * 2),
+                                 CGRect(x: rect.maxX, y: own.midY - lineHeight, width: wide.maxX - rect.maxX, height: lineHeight * 2)].filter { $0.width > 0.5 }
+                    let tall = sides.allSatisfy { side in
+                        guard let high = ink.highestInk(in: side), let low = ink.lowestInk(in: side) else { return true }
+                        return high - low > own.height * 1.3
+                    }
+                    // Nothing else may stand there, on this row or another.
+                    let taken = lines.indices.contains { $0 != index && !lines[$0].text.isEmpty && sides.contains(where: lines[$0].bounds.intersects) }
+                    if tall, !taken, !others.contains(where: { $0.intersects(wide.insetBy(dx: 0, dy: 1)) }) {
+                        let grown = ink.grownVertically(wide, limit: lineHeight * 0.6)
+                        rect = others.contains(where: { $0.intersects(grown.insetBy(dx: 0, dy: 1)) }) ? wide : grown
+                    }
+                }
                 guard let image = renderPNG(of: page, rect: rect.insetBy(dx: -1, dy: -1), pageBounds: pageBounds), hasInk(image) else { continue }
                 lines[index].text = " \(markerPrefix)\(firstFigureNumber + figures.count) "
                 figures.append(PageFigure(kind: .formula, imageData: image, text: text))
