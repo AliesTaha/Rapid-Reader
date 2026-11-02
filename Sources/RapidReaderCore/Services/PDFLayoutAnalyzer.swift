@@ -15,6 +15,8 @@ enum PDFLayoutAnalyzer {
     static let markerPrefix = "RRFIGUREMARKER"
     /// Starts a line set in small print, such as a footnote or a margin note.
     static let smallPrint = "\u{E000}"
+    /// Starts a heading line set larger than the body, such as "Sum queries".
+    static let headingPrint = "\u{E001}"
 
     struct PageFigure {
         var kind: SectionFigure.Kind
@@ -34,6 +36,7 @@ enum PDFLayoutAnalyzer {
         var kind: SectionFigure.Kind?
         var block: Int?
         var small = false
+        var heading = false
     }
 
     private struct Block {
@@ -139,6 +142,16 @@ enum PDFLayoutAnalyzer {
         var running = 0
         if let body = weighted.first(where: { running += $0.1; return running * 2 >= total })?.0 {
             for index in lines.indices { lines[index].small = sizes[index].map { $0 < body * 0.93 } ?? false }
+            // A heading is a few words set well above the body size, ending without punctuation.
+            // A heading over several lines, as a title and its subtitle, is one: only its first line
+            // starts it.
+            for index in lines.indices where sizes[index].map({ $0 >= body * 1.2 }) == true && lines[index].kind == nil {
+                let words = lines[index].text.split(whereSeparator: \.isWhitespace)
+                let continued = index > 0 && sizes[index - 1].map { abs($0 - sizes[index]!) < 0.5 } == true
+                    && lines[index - 1].bounds.minY - lines[index].bounds.maxY < sizes[index]! * 1.5
+                lines[index].heading = !continued && (1...8).contains(words.count) && words.contains(where: isWord)
+                    && lines[index].text.range(of: #"[.,;:]$"#, options: .regularExpression) == nil
+            }
         }
         // PDFKit can report a sentence's box tall enough to cover the display beside it, as for
         // "and outcome, it can be rewritten as follows:" over Equation 2.10. The sentence is the
@@ -866,7 +879,7 @@ enum PDFLayoutAnalyzer {
                     + lines[index].text.trimmingCharacters(in: .whitespaces)
                 return
             }
-            output.append((lines[index].small && !lines[index].text.isEmpty ? smallPrint : "") + lines[index].text)
+            output.append((lines[index].small && !lines[index].text.isEmpty ? smallPrint : lines[index].heading ? headingPrint : "") + lines[index].text)
         }
         for index in 0...lines.count {
             // A figure in the side column, as a margin figure over its small caption, is marked

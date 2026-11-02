@@ -31,13 +31,23 @@ public enum PDFTextExtractor {
         chapters = chapters.enumerated().sorted { ($0.element.page, $0.offset) < ($1.element.page, $1.offset) }.map(\.element)
         if let first = chapters.first, first.page > 0 { chapters.insert((0, "Opening"), at: 0) }
 
-        let sections: [BookSection]
+        let mark = PDFLayoutAnalyzer.headingPrint
+        var sections: [BookSection]
         if chapters.isEmpty {
-            sections = pages.enumerated().map { BookSection(title: "Page \($0.offset + 1)", text: $0.element) }
+            sections = pages.enumerated().map { BookSection(title: "Page \($0.offset + 1)", text: $0.element.replacingOccurrences(of: mark, with: "")) }
         } else {
             // A section starts at its heading, not at the top of its page: the outline points at the
             // page, and an anchor set just above a heading can even fall at the foot of the page before.
-            let pageLines = pages.map { $0.components(separatedBy: "\n") }
+            var pageLines = pages.map { $0.components(separatedBy: "\n") }
+            // Headings the outline leaves out, as "Sum queries" under "9.1 Static array queries", are
+            // marked by the layout; they start sections of their own.
+            var headings: [(page: Int, line: Int)] = []
+            for page in pageLines.indices {
+                for line in pageLines[page].indices where pageLines[page][line].contains(mark) {
+                    if pageLines[page][line].hasPrefix(mark) { headings.append((page, line)) }
+                    pageLines[page][line] = pageLines[page][line].replacingOccurrences(of: mark, with: "")
+                }
+            }
             var starts: [(page: Int, line: Int)] = []
             for (number, chapter) in chapters.enumerated() {
                 let previous = starts.last ?? (0, 0)
@@ -59,29 +69,63 @@ public enum PDFTextExtractor {
                     return first < last ? lines[first..<last].joined(separator: "\n") : ""
                 }.joined(separator: "\n\n")
             }
-            // Entries whose heading could not be told apart from the one before share its start;
-            // their text stays with that section.
-            let kept = chapters.indices.filter { $0 == 0 || starts[$0] > starts[$0 - 1] }
             // The section's title shows above its text, so the heading it starts with, as "3.1
             // Sorting theory" or "Chapter 3" over "Sorting", is not read again.
             func letters(_ value: String) -> String { value.lowercased().filter(\.isLetter) }
-            func heading(_ line: String, of title: String) -> Bool {
+            func heading(_ line: String, of title: String, partly: Bool = false) -> Bool {
                 let line = line.hasPrefix(PDFLayoutAnalyzer.smallPrint) ? String(line.dropFirst(PDFLayoutAnalyzer.smallPrint.count)) : line
                 guard !PDFLayoutAnalyzer.isMarker(line), line.count <= title.count + 16 else { return false }
                 // A part's title carries its numeral, as "II Graph algorithms" over "Graph algorithms".
                 let own = letters(line), wanted = letters(title), bare = letters(title.replacingOccurrences(of: #"^[IVXL]+\s+"#, with: "", options: .regularExpression))
-                return !wanted.isEmpty && (own == wanted || own == bare || own == "chapter" + wanted || own == "part" + wanted || own == "part" + bare)
+                // At a section's start, a title over two lines, as "4.5.3 Collider Bias and Why to Not
+                // Condition on" + "Descendants of Treatment", is not read either.
+                return !wanted.isEmpty && (own == wanted || own == bare || own == "chapter" + wanted || own == "part" + wanted || own == "part" + bare
+                    || partly && own.count >= 8 && wanted.count >= own.count + 5 && (wanted.hasPrefix(own) || wanted.hasSuffix(own)))
                     || line.range(of: #"^(Chapter|Part)\s+([0-9]+|[IVXL]+)$"#, options: .regularExpression) != nil
             }
+            var entries = chapters.indices.map { (start: starts[$0], title: chapters[$0].title) }
+            var added: [(page: Int, line: Int)] = []
+            for found in headings {
+                let line = pageLines[found.page][found.line].trimmingCharacters(in: .whitespaces)
+                // A heading over two lines, as "Unobserved Confounding:" + "Bounds and Sensitivity
+                // Analysis", starts once; an outline entry's own heading, as "Static array queries" or
+                // "Chapter 9" over it, already starts a section. A contents entry, as "6 Nonparametric
+                // Identification 61", or an author's affiliation, as "¹Cornell Tech", is no heading.
+                let previous = found.line > 0 ? pageLines[found.page][found.line - 1].trimmingCharacters(in: .whitespaces) : ""
+                let wrapped = chapters.contains(where: { !letters($0.title).isEmpty && letters(previous + line) == letters($0.title) })
+                guard !wrapped, !entries.contains(where: { $0.start == found }),
+                      !chapters.contains(where: { abs($0.page - found.page) <= 1 && heading(line, of: $0.title) }),
+                      line.first.map({ $0.isLetter || $0.isNumber && $0.isASCII }) == true,
+                      line.range(of: #"^[A-Z]?\d+(\.\d+)*\s.*\s\d+$"#, options: .regularExpression) == nil,
+                      let after = entries.lastIndex(where: { $0.start <= found }) else { continue }
+                // Its number, as the "A.1" of "A.1 Proof of Equation 6.1", is not read in a title.
+                entries.insert((found, line.replacingOccurrences(of: #"^([A-Z]|\d+)(\.\d+)*\.?\s+(?=\p{L})"#, with: "", options: .regularExpression)), at: after + 1)
+                added.append(found)
+            }
+            // Entries whose heading could not be told apart from the one before share its start;
+            // their text stays with that section.
+            let kept = entries.indices.filter { $0 == 0 || entries[$0].start > entries[$0 - 1].start }
             sections = kept.enumerated().map { position, index in
-                let end = position + 1 < kept.count ? starts[kept[position + 1]] : (pages.count, 0)
-                var start = starts[index]
+                let end = position + 1 < kept.count ? entries[kept[position + 1]].start : (pages.count, 0)
+                var start = entries[index].start
                 for _ in 0..<2 where start.page < pageLines.count && start.line < pageLines[start.page].count
-                    && (start.page, start.line) < (end.0, end.1) && heading(pageLines[start.page][start.line], of: chapters[index].title) {
+                    && (start.page, start.line) < (end.0, end.1) && heading(pageLines[start.page][start.line], of: entries[index].title, partly: true) {
                     start.line += 1
                 }
-                return BookSection(title: chapters[index].title, text: text(from: start, to: end))
+                return BookSection(title: entries[index].title, text: text(from: start, to: end))
             }
+            // A section that opens straight on a subheading, as "Working with numbers" on "Integers",
+            // has no text of its own; its title goes before the subheading's.
+            var merged: [BookSection] = []
+            for (position, section) in sections.enumerated() {
+                if let last = merged.last, last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   added.contains(where: { $0 == entries[kept[position]].start }) {
+                    merged[merged.count - 1] = BookSection(title: last.title + ": " + section.title, text: section.text)
+                } else {
+                    merged.append(section)
+                }
+            }
+            sections = merged
         }
         let readable = placingFigures(sections, figures: figures)
         guard !readable.isEmpty else { throw DocumentImportError.emptyDocument(url.lastPathComponent) }
