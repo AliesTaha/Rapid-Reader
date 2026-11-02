@@ -35,7 +35,7 @@ enum WordSplitter {
             // The spelling service accepts any word with a capital inside, like "iPhone", so
             // "GettingAround" is split at its capitals before anything is looked up.
             let joinedAtCapital = run.range(of: #"\p{Ll}\p{Lu}"#, options: .regularExpression) != nil
-            guard joinedAtCapital || !isWord(run) else { continue }
+            guard joinedAtCapital || !isWord(run) && !prefixed(run) else { continue }
             // Capitals mark word starts first: "countsinTable" is "countsin" and "Table".
             let parts = camelParts(run).map { part in
                 isWord(part) || isAcronym(part) || part.count < 2 ? part : (pieces(of: part)?.joined(separator: " ") ?? part)
@@ -44,6 +44,14 @@ enum WordSplitter {
             if split != run { result.replaceSubrange(range, with: split) }
         }
         return result
+    }
+
+    /// A word the dictionary lacks but builds from a prefix, as "hyperparameters" or
+    /// "Metalearners", is one word, not "hyper parameters" or "Metal earners".
+    private static func prefixed(_ run: String) -> Bool {
+        let lower = run.lowercased()
+        return ["hyper", "meta", "multi", "inter", "intra", "super", "sub", "semi", "pseudo", "non", "pre", "post", "auto", "self", "co", "re", "un", "over", "under", "counter", "cross", "micro", "macro", "mini"]
+            .contains { lower.hasPrefix($0) && lower.count - $0.count >= 4 && isWord(String(lower.dropFirst($0.count))) }
     }
 
     /// Splits before a capital that follows a lowercase letter, and where a run of capitals
