@@ -1358,19 +1358,24 @@ enum PDFLayoutAnalyzer {
             // over the radicand's first and last letters, above where letters reach.
             let share = after.width * CGFloat(radicand.count) / CGFloat(line[next].count)
             let band = CGRect(x: 0, y: baseline + size * 0.76, width: 0, height: size * 0.45)
-            let tops = [after.minX + 0.5, after.minX + share - 1.5].map { ink.highestInk(in: CGRect(x: $0, y: band.minY, width: 1, height: band.height)) }
+            // The rule is the top of the ink over the letters, or, where the line above reaches
+            // down into the band, the first ink over them.
+            let columns = [after.minX + 0.5, after.minX + share - 1.5].map { CGRect(x: $0, y: band.minY, width: 1, height: band.height) }
+            let highest = columns.map { ink.highestInk(in: $0) }, lowest = columns.map { ink.lowestInk(in: $0) }
+            let level = { (pair: [CGFloat?]) -> Bool in pair[0] != nil && pair[1] != nil && abs(pair[0]! - pair[1]!) <= 1 }
+            let tops = level(highest) ? highest : lowest
             guard let left = tops[0], let right = tops[1], abs(left - right) <= 1, left < band.maxY - 1 else { continue }
             // The rule is unbroken from the sign across the radicand, with little just above it;
             // the descenders of the line above are neither.
             let steps = Array(stride(from: after.minX - 1.5, through: after.minX + share - 1, by: 0.5))
             guard steps.filter({ ink.inked(CGRect(x: $0, y: left - 1.5, width: 0.5, height: 2)) }).count * 10 >= steps.count * 9,
-                  steps.filter({ ink.inked(CGRect(x: $0, y: left + 1.3, width: 0.5, height: 1)) }).count * 10 <= steps.count * 4,
+                  steps.filter({ ink.inked(CGRect(x: $0, y: left + 1.8, width: 0.5, height: 1)) }).count * 10 <= steps.count * 4,
                   // and starts at the sign, unlike a table's rule over a row of figures.
                   !ink.inked(CGRect(x: after.minX - size * 1.3, y: left - 0.7, width: size * 0.25, height: 1.2)) else { continue }
             // The sign itself stands just before the radicand, from below the line up to the rule.
             let root = CGRect(x: after.minX - size * 0.9, y: baseline - size * 0.4, width: size * 0.9, height: left - baseline + size * 0.4 + 0.5)
-            guard let low = ink.lowestInk(in: root), low <= baseline - size * 0.15,
-                  let high = ink.highestInk(in: CGRect(x: after.minX - size * 0.6, y: root.minY, width: size * 0.6, height: root.height)), high >= left - 1 else { continue }
+            guard let low = ink.lowestInk(in: root), low <= baseline - size * 0.08,
+                  let high = ink.highestInk(in: CGRect(x: after.minX - size * 0.9, y: root.minY, width: size * 0.9, height: root.height + 1)), high >= left - 1 else { continue }
             let joined = line[previous].last.map { "([{⌊⌈".contains($0) } == true
             let key = String(line[previous]) + " " + String(line[next])
             result[key] = String(line[previous]) + (joined ? "" : " ") + "√" + String(line[next])
