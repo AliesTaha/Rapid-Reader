@@ -235,6 +235,7 @@ enum PDFLayoutAnalyzer {
         }
         var figures: [PageFigure] = []
         var markersBefore: [Int: [Int]] = [:]
+        var figureRects: [Int: CGRect] = [:]
         let lineHeight = typicalLineHeight(lines.map(\.bounds))
         // PDFKit's line boxes can stop short of a wide equation; the crop follows the ink instead.
         if blocks.contains(where: { $0.kind == .formula || $0.kind == .code }), let ink = InkMap(page: page, bounds: pageBounds) {
@@ -353,6 +354,7 @@ enum PDFLayoutAnalyzer {
                 }
             }
             markersBefore[position, default: []].append(firstFigureNumber + figures.count)
+            figureRects[firstFigureNumber + figures.count] = block.rect
             figures.append(PageFigure(kind: block.kind, imageData: image, text: text))
         }
 
@@ -832,7 +834,12 @@ enum PDFLayoutAnalyzer {
             output.append((lines[index].small && !lines[index].text.isEmpty ? smallPrint : "") + lines[index].text)
         }
         for index in 0...lines.count {
-            output += (markersBefore[index] ?? []).map { "\(markerPrefix)\($0)" }
+            // A figure in the side column, as a margin figure over its small caption, is marked
+            // small like its caption and notes.
+            output += (markersBefore[index] ?? []).map { number in
+                let side = figureRects[number].map { rect in bodyRight.map { rect.minX >= $0 - 4 } ?? false } ?? false
+                return (side ? smallPrint : "") + "\(markerPrefix)\(number)"
+            }
             guard index < lines.count, lines[index].block == nil, !moved.contains(index) else { continue }
             // Text set sideways, as an arXiv stamp in the margin or an axis title, is not read; a
             // figure's picture still shows it.

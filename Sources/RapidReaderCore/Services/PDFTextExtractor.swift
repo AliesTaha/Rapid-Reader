@@ -403,7 +403,7 @@ public enum PDFTextExtractor {
                     // Entries wrap, as "1.2 Applications of Causal Infer-" + "ence 2", so a line that
                     // opens with a section's number counts too.
                     let entries = run.filter { numbered($0) || $0.range(of: #"^(\d{1,2}|[A-Z])\.\d{1,2}\s"#, options: .regularExpression) != nil }.count
-                    if run.count >= 3, run.filter(numbered).count >= 2, entries * 2 >= run.count {
+                    if run.count >= 3, run.filter(numbered).count >= 2, entries * 2 >= run.count, !run.contains(where: { PDFLayoutAnalyzer.isMarker(String($0)) }) {
                         pages[page].removeSubrange(index...(index + last))
                         continue
                     }
@@ -420,16 +420,21 @@ public enum PDFTextExtractor {
         let mark = PDFLayoutAnalyzer.smallPrint
         func small(_ line: String) -> Bool { line.hasPrefix(mark) }
         func noteStart(_ line: String) -> Bool {
-            small(line) && line.dropFirst(mark.count).range(of: #"^\s*(\d{1,2}|[∗†‡§¶*]+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s?[\p{L}“"(]"#, options: .regularExpression) != nil
+            small(line) && line.dropFirst(mark.count).range(of: #"^\s*(\d{1,2}|[∗†‡§¶*]+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+|\[\d{1,3}\]:)\s?[\p{L}“"(]"#, options: .regularExpression) != nil
         }
         func body(_ line: String) -> Bool { !small(line) && !PDFLayoutAnalyzer.isMarker(line) }
         // A colon introduces what follows, often a picture; the sentence goes on.
-        func endsSentence(_ line: String) -> Bool { line.range(of: #"[.!?]["”’)]?$"#, options: .regularExpression) != nil }
+        // "(e.g." and "i.e." do not end one.
+        func endsSentence(_ line: String) -> Bool {
+            line.range(of: #"[.!?]["”’)]?$"#, options: .regularExpression) != nil
+                && line.range(of: #"(\b(e\.g|i\.e|cf|vs|etc|al|Eq|Fig|Sec)\.|\bet al\.)$"#, options: .regularExpression) == nil
+        }
         for page in pages.indices {
             var index = 0
             while index < pages[page].count {
                 guard small(pages[page][index]), index == 0 || !small(pages[page][index - 1]) else { index += 1; continue }
-                let numbered = noteStart(pages[page][index])
+                let first = pages[page][index...].firstIndex { small($0) && !PDFLayoutAnalyzer.isMarker(String($0.dropFirst(mark.count))) } ?? index
+                let numbered = noteStart(pages[page][first])
                 var end = index + 1
                 while end < pages[page].count, small(pages[page][end]) { end += 1 }
                 // A note is words; small pieces of mathematics are not. A margin note without a
@@ -439,7 +444,11 @@ public enum PDFTextExtractor {
                 // Without a number, a run with mathematics cropped inside its lines, as "⟦⟧ be its
                 // law, ⟦⟧ its temperature,", is a small line of the body.
                 let inline = pages[page][index..<end].contains { $0.replacingOccurrences(of: mark, with: "").range(of: #"\S\s*\#(PDFLayoutAnalyzer.markerPrefix)|\#(PDFLayoutAnalyzer.markerPrefix)\d+\s*\S"#, options: .regularExpression) != nil }
-                guard words >= 3, numbered || words >= 5 && !inline && words * 5 >= tokens.count * 2, let previous = pages[page][..<index].last(where: body), !endsSentence(previous) else { index = end; continue }
+                // A margin figure, marked small by the layout, comes with its caption, which can hold
+                // a crop of its own.
+                let figure = pages[page][index..<end].contains { PDFLayoutAnalyzer.isMarker(String($0.dropFirst(mark.count))) }
+                guard words >= 3, numbered || words >= 5 && (!inline || figure) && words * 5 >= tokens.count * 2, let previous = pages[page][..<index].last(where: body) ?? (page > 0 && !pages[page][..<index].contains(where: body) ? pages[page - 1].last(where: body) : nil),
+                      !endsSentence(previous) else { index = end; continue }
                 // The first line after the run that ends a sentence of the body.
                 var target: (page: Int, line: Int)?
                 var position = (page, end)
