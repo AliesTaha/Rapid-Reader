@@ -1835,7 +1835,9 @@ enum PDFLayoutAnalyzer {
     /// A row of array cells or table entries, such as `1 3 6 2 8 2 5 9` or `X X X X`.
     private static func isDataRow(_ text: String) -> Bool {
         let tokens = text.split(whereSeparator: \.isWhitespace)
+        // Three figures in a row, as "0 0 1" in a table of values, are a row too.
         return tokens.count >= 4 && tokens.allSatisfy { $0.count <= 3 && $0.range(of: #"\p{L}{2,}"#, options: .regularExpression) == nil }
+            || tokens.count == 3 && tokens.allSatisfy { $0.count <= 3 && $0.allSatisfy(\.isNumber) }
     }
 
     private static func isWord(_ token: Substring) -> Bool {
