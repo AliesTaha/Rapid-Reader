@@ -200,10 +200,12 @@ public enum TextProcessor {
 
     /// Words, numbers and mathematical symbols are read; dashes, bullets and other punctuation
     /// standing alone are not. A lone "+", "≤" or "∅" carries meaning.
+    /// A string of brackets, as the parenthesis expression "())()(", is read too.
     private static func containsReadableScalar(_ token: String) -> Bool {
-        token.unicodeScalars.contains { scalar in
+        if token.count >= 2, token.allSatisfy({ "()[]{}".contains($0) }) { return true }
+        return token.unicodeScalars.contains { scalar in
             CharacterSet.alphanumerics.contains(scalar) || scalar.properties.generalCategory == .mathSymbol
-                || "∅∞&%#√∑∏∫∂∇∀∃⋯/".unicodeScalars.contains(scalar)
+                || "∅∞&%#√∑∏∫∂∇∀∃⋯/@*".unicodeScalars.contains(scalar)
         }
     }
 

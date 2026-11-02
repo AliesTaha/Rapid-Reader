@@ -348,6 +348,7 @@ public enum PDFTextExtractor {
         }
         droppingMarginContents(&kept)
         kept = kept.map(tidyingListings)
+        kept = kept.map(raisingFootnoteMarks)
         movingNotes(&kept)
         movingPageTopCaptions(&kept)
         return kept.map { page in
@@ -364,15 +365,33 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"\b(Assumption|Figure|Table|Definition|Theorem|Section|Chapter|Equation|Proposition|Lemma|Corollary|Example|Listing)(\d)"#, with: "$1 $2", options: .regularExpression)
                 // A title after a number, as "Assumption 2.1(Ignorability", has its space back.
                 .replacingOccurrences(of: #"(\d)\((\p{Lu}\p{Ll}{2,})"#, with: "$1 ($2", options: .regularExpression)
+                // "O(logn)" and "O(mlogm)" read "O(log n)" and "O(m log m)".
+                .replacingOccurrences(of: #"(?<![\p{L}])([a-z])log([a-z])(?![\p{L}(])"#, with: "$1 log $2", options: .regularExpression)
+                .replacingOccurrences(of: #"(?<![\p{L}])log([a-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
                 .replacingOccurrences(of: #"·\s?·\s?·"#, with: "⋯", options: .regularExpression)
                 // A web address broken after a slash goes on without a space.
                 .replacingOccurrences(of: #"(https?://\S*/)\n(?=\w)"#, with: "$1", options: .regularExpression)
                 .replacingOccurrences(of: "ﬃ", with: "ffi").replacingOccurrences(of: "ﬄ", with: "ffl")
                 .replacingOccurrences(of: "ﬀ", with: "ff").replacingOccurrences(of: "ﬁ", with: "fi").replacingOccurrences(of: "ﬂ", with: "fl")
-            return TextProcessor.normalizedText(rejoiningSplitWords(dehyphenated(attachingAccents(separatingIdentifiers(joined)))))
+            return TextProcessor.normalizedText(rejoiningSplitWords(dehyphenated(attachingAccents(composingNameAccents(separatingIdentifiers(joined))))))
         }
     }
+    /// A name's accent that PDFKit set apart before its letter, as "K˝ onig", "Sta´ nczyk" or
+    /// "Dud´ık", goes on that letter: "Kőnig", "Stańczyk", "Dudík".
+    static func composingNameAccents(_ text: String) -> String {
+        let marks: [Character: String] = ["˝": "\u{30B}", "´": "\u{301}", "`": "\u{300}", "¨": "\u{308}"]
+        guard let pattern = try? NSRegularExpression(pattern: #"(?<=\p{L})([˝´`¨]) ?(\p{Ll}|ı)"#) else { return text }
+        var result = text
+        for match in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let whole = Range(match.range, in: result), let mark = Range(match.range(at: 1), in: result), let letter = Range(match.range(at: 2), in: result),
+                  let combining = marks[result[mark].first!] else { continue }
+            let base = result[letter] == "ı" ? "i" : String(result[letter])
+            result.replaceSubrange(whole, with: (base + combining).precomposedStringWithCanonicalMapping)
+        }
+        return result
+    }
+
     /// A name with underscores that the PDF glued to the next word, as "warmup_stepstraining",
     /// is split where a name the page uses elsewhere ends.
     static func separatingIdentifiers(_ text: String) -> String {
@@ -469,6 +488,43 @@ public enum PDFTextExtractor {
             pages[page].insert(contentsOf: block, at: close + 1)
             pages[page].removeSubrange(0..<end)
         }
+    }
+
+    /// A footnote's number that PDFKit set level with the text, as "algorithm1" over a small
+    /// note "1The algorithm was …", is raised after a word, never after a name such as "x1":
+    /// "algorithm¹" and "¹ The algorithm was …".
+    static func raisingFootnoteMarks(_ page: [String]) -> [String] {
+        let mark = PDFLayoutAnalyzer.smallPrint
+        let raised: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹"]
+        func up(_ number: String) -> String { String(number.compactMap { raised[$0] }) }
+        var numbers: Set<String> = []
+        var page = page
+        for index in page.indices where page[index].hasPrefix(mark) {
+            let line = String(page[index].dropFirst(mark.count))
+            guard let match = line.firstMatch(of: /^(\d{1,2}) ?(\p{Lu}[\p{L}’']*)/), String(match.output.2).count >= 2 || String(match.output.2) == "A" || String(match.output.2) == "I" else { continue }
+            let number = String(match.output.1)
+            numbers.insert(number)
+            page[index] = mark + up(number) + " " + line.dropFirst(number.count).drop { $0 == " " }
+        }
+        guard !numbers.isEmpty else { return page }
+        for index in page.indices where !page[index].hasPrefix(mark) {
+            for number in numbers {
+                guard let pattern = try? NSRegularExpression(pattern: #"([\p{L}’'.-]*\p{Ll})"# + number + #"(?=[.,:;)]?(\s|$))"#) else { continue }
+                let line = page[index]
+                var result = line
+                for match in pattern.matches(in: line, range: NSRange(line.startIndex..., in: line)).reversed() {
+                    guard let whole = Range(match.range, in: result), let word = Range(match.range(at: 1), in: result) else { continue }
+                    let letters = result[word].filter(\.isLetter)
+                    // The word it follows is a real one, as "algorithm", not a name such as "x" or "diag".
+                    // A label in brackets, as "(Int1)", keeps its number.
+                    let bracketed = word.lowerBound > result.startIndex && result[result.index(before: word.lowerBound)] == "("
+                    guard letters.count >= 3, !bracketed, WordSplitter.isWord(String(letters).lowercased()) || result[word].contains("-") else { continue }
+                    result.replaceSubrange(whole, with: result[word] + up(number))
+                }
+                page[index] = result
+            }
+        }
+        return page
     }
 
     /// A footnote or margin note that reading order put inside a sentence, as "3,7,11,15" +
