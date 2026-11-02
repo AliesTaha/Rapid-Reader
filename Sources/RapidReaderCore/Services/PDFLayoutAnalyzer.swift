@@ -2367,6 +2367,8 @@ enum PDFLayoutAnalyzer {
                                                     "at", "on", "so", "be", "we", "let", "since", "hence", "thus", "when", "all", "any", "each", "are", "has", "have"]
     private static func braceLabel(_ text: String) -> Bool {
         let tokens = text.split(whereSeparator: \.isWhitespace)
+        // A numbered term, as "III: Invariance Penalty" under a brace, is a label too.
+        if (2...4).contains(tokens.count), text.range(of: #"^[IVX]{1,4}:\s+\p{Lu}"#, options: .regularExpression) != nil { return true }
         return (1...2).contains(tokens.count) && tokens.allSatisfy { $0.count >= 3 && $0.allSatisfy { $0.isLowercase } && !joiningWords.contains(String($0)) }
     }
 
@@ -2626,8 +2628,10 @@ enum PDFLayoutAnalyzer {
         func touching(_ a: CGRect, _ b: CGRect) -> Bool { sameRow(a, b) && max(a.minX, b.minX) - min(a.maxX, b.maxX) < 4 }
         // The limits of a sum or product, such as "i=1" under ∏, sit just above or below it.
         func limit(_ line: Line, _ block: CGRect) -> Bool {
-            (line.text.count <= 8 && !line.text.contains(where: \.isWhitespace) || braceLabel(line.text)) && line.text.contains(where: { $0.isNumber || $0.isLetter })
-                && line.bounds.minX >= block.minX - 2 && line.bounds.maxX <= block.maxX + 2
+            // A label under a brace can stand out past the formula's ends.
+            let slack: CGFloat = braceLabel(line.text) ? 30 : 2
+            return (line.text.count <= 8 && !line.text.contains(where: \.isWhitespace) || braceLabel(line.text)) && line.text.contains(where: { $0.isNumber || $0.isLetter })
+                && line.bounds.minX >= block.minX - slack && line.bounds.maxX <= block.maxX + slack
                 && max(line.bounds.minY, block.minY) - min(line.bounds.maxY, block.maxY) < 3
         }
         // A row that holds a sentence, as in "(A8) Weight size. δ2 n,inv(ν) ≲ …", is inline mathematics.
