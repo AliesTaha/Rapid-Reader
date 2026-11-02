@@ -210,6 +210,7 @@ enum PDFLayoutAnalyzer {
         gatherTables(&blocks, lines: &lines, page: page, bounds: pageBounds)
         gatherFigures(&blocks, lines: &lines, ink: pageInk)
         joinSideBySide(&blocks, lines: &lines)
+        attachTableHeaders(&blocks, lines: &lines)
         // A wordless label lying partly over a drawing, such as a figure's own title, is part of it.
         for index in lines.indices where lines[index].block == nil && lines[index].kind == nil
             && !lines[index].text.split(whereSeparator: \.isWhitespace).contains(where: isWord) && lines[index].text.contains(where: \.isLetter) {
@@ -1838,6 +1839,12 @@ enum PDFLayoutAnalyzer {
         // Three figures in a row, as "0 0 1" in a table of values, are a row too.
         return tokens.count >= 4 && tokens.allSatisfy { $0.count <= 3 && $0.range(of: #"\p{L}{2,}"#, options: .regularExpression) == nil }
             || tokens.count == 3 && tokens.allSatisfy { $0.count <= 3 && $0.allSatisfy(\.isNumber) }
+            // So are figures after a name, as "John 10 15" or "103 0.001000 1.000000".
+            // A matrix's short rows, as "1 4", stay with their display.
+            || text.range(of: #"^(\p{Lu}\p{Ll}{1,12}\s+)?(\d+(\.\d+)?\s+)+\d+(\.\d+)?$"#, options: .regularExpression) != nil
+                // Axis ticks and years, as "1999 2000 2001", are labels of a chart.
+                && (tokens.first?.first?.isLetter == true || tokens.count == 2 && tokens.contains { $0.count >= 4 }
+                    || tokens.contains { $0.range(of: #"\.\d{3,}$"#, options: .regularExpression) != nil })
     }
 
     private static func isWord(_ token: Substring) -> Bool {
@@ -2100,6 +2107,26 @@ enum PDFLayoutAnalyzer {
             }
         }
         blocks = compacted(blocks, lines: &lines)
+    }
+
+    /// A table drawn as rows of figures, as "John 10 15", takes the row of headings just over it,
+    /// as "person arrival time leaving time".
+    private static func attachTableHeaders(_ blocks: inout [Block], lines: inout [Line]) {
+        for index in blocks.indices where blocks[index].kind == .image && !blocks[index].rect.isNull {
+            let members = lines.indices.filter { lines[$0].block == index }
+            guard members.count >= 2, members.allSatisfy({ isDataRow(lines[$0].text) || lines[$0].text.split(whereSeparator: \.isWhitespace).count <= 2 }) else { continue }
+            let rect = blocks[index].rect
+            let rowHeight = members.map { lines[$0].bounds.height }.min() ?? 10
+            guard let header = lines.indices.filter({ index in
+                let line = lines[index]
+                return line.block == nil && line.bounds.minY >= rect.maxY - 2 && line.bounds.minY - rect.maxY < rowHeight * 1.5
+                    && line.bounds.minX >= rect.minX - 40 && line.bounds.maxX <= rect.maxX + 40
+                    && line.text.split(whereSeparator: \.isWhitespace).count <= 8 && line.text.range(of: #"[.:;,?!]$"#, options: .regularExpression) == nil
+            }).min(by: { lines[$0].bounds.minY < lines[$1].bounds.minY }) else { continue }
+            lines[header].block = index
+            blocks[index].rect = rect.union(lines[header].bounds)
+            blocks[index].firstLine = min(blocks[index].firstLine ?? header, header)
+        }
     }
 
     /// The panels of one figure, such as "Population", "Subpopulations", "Conditioning" and
