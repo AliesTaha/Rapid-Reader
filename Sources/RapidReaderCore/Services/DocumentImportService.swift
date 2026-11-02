@@ -60,7 +60,7 @@ public final class DocumentImportService: Sendable {
         case "rtf", "rtfd":
             return try importAttributedText(at: url, format: .rtf)
         case "html", "htm", "xhtml":
-            return try importHTMLFile(at: url)
+            return try await importHTMLFile(at: url)
         case "md", "markdown":
             return try importPlainTextFile(at: url, format: .markdown)
         case "txt", "text":
@@ -108,8 +108,8 @@ public final class DocumentImportService: Sendable {
             HTMLTextExtractor.title(fromHTML: html),
             fallback: url.host(percentEncoded: false) ?? "Web Article"
         )
-        let body = HTMLTextExtractor.articleText(html)
-        guard !body.isEmpty else {
+        let sections = await Self.htmlSections(html, baseURL: url, article: true, title: title)
+        guard sections.contains(where: { $0.wordCount > 0 }) else {
             throw DocumentImportError.emptyDocument(url.absoluteString)
         }
 
@@ -118,8 +118,15 @@ public final class DocumentImportService: Sendable {
             sourceName: url.absoluteString,
             sourceURL: url.absoluteString,
             format: .webArticle,
-            sections: TextProcessor.sections(from: body, fallbackTitle: title)
+            sections: sections
         )
+    }
+
+    /// Reading sections for a page, with its figures, code, tables and equations rendered as pictures.
+    private static func htmlSections(_ html: String, baseURL: URL, article: Bool, title: String) async -> [BookSection] {
+        guard let extraction = WebArticleExtractor.extract(html, article: article) else { return [] }
+        let images = await WebSnapshotter.render(html: extraction.renderHTML, baseURL: baseURL, requests: extraction.requests)
+        return WebArticleExtractor.sections(from: extraction, images: images, fallbackTitle: title)
     }
 
     private func importPlainTextFile(at url: URL, format: ReadingFormat) throws -> ImportedDocument {
@@ -143,15 +150,15 @@ public final class DocumentImportService: Sendable {
         )
     }
 
-    private func importHTMLFile(at url: URL) throws -> ImportedDocument {
+    private func importHTMLFile(at url: URL) async throws -> ImportedDocument {
         let data = try Data(contentsOf: url)
-        let html = String(data: data, encoding: .utf8) ?? ""
+        let html = HTMLTextExtractor.decode(data)
         let title = TextProcessor.cleanedTitle(
             HTMLTextExtractor.title(fromHTML: html),
             fallback: url.deletingPathExtension().lastPathComponent
         )
-        let text = HTMLTextExtractor.plainText(from: data, baseURL: url.deletingLastPathComponent())
-        guard !text.isEmpty else {
+        let sections = await Self.htmlSections(html, baseURL: url.deletingLastPathComponent(), article: false, title: title)
+        guard sections.contains(where: { $0.wordCount > 0 }) else {
             throw DocumentImportError.emptyDocument(url.lastPathComponent)
         }
 
@@ -160,7 +167,7 @@ public final class DocumentImportService: Sendable {
             sourceName: url.lastPathComponent,
             sourceURL: url.absoluteString,
             format: .html,
-            sections: TextProcessor.sections(from: text, fallbackTitle: title)
+            sections: sections
         )
     }
 

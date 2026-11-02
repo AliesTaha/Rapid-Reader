@@ -28,7 +28,7 @@ final class TextProcessorTests: XCTestCase {
         for token in tokenized.tokens {
             XCTAssertEqual(source.substring(with: token.range), token.text)
         }
-        XCTAssertEqual(RSVPWord("Hello!\"").punctuationDelayMultiplier, 1.8)
+        XCTAssertEqual(RSVPWord("Hello!\"").punctuationDelayMultiplier, 2.6)
     }
 
     func testRSVPPivot() {

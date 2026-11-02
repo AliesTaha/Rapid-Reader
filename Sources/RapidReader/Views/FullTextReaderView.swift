@@ -108,6 +108,11 @@ private enum TextDocumentBuilder {
             .foregroundColor: textColor,
             .paragraphStyle: bodyStyle
         ]
+        let figureStyle = NSMutableParagraphStyle()
+        figureStyle.alignment = .center
+        figureStyle.paragraphSpacing = 14
+        figureStyle.paragraphSpacingBefore = 6
+
         let headingAttributes: [NSAttributedString.Key: Any] = [
             .font: readingFont(size: 26, weight: .semibold),
             .foregroundColor: textColor,
@@ -127,8 +132,21 @@ private enum TextDocumentBuilder {
 
             let ranges = tokenized.tokens.map(\.range)
 
+            // Figures go in from the end so earlier insertion points stay valid.
+            let figures = section.figures.sorted { $0.wordIndex < $1.wordIndex }
+            var insertedBefore = Array(repeating: 0, count: ranges.count + 1)
+            for figure in figures.reversed() {
+                guard let image = NSImage.figure(figure) else { continue }
+                let wordIndex = min(max(figure.wordIndex, 0), ranges.count)
+                let location = wordIndex < ranges.count ? ranges[wordIndex].location : (sectionText as NSString).length
+                // Expressions cropped from a sentence stay in the line; larger figures get their own.
+                let block = image.size.height <= 30 ? inlineFigure(image) : figureBlock(image, paragraphStyle: figureStyle)
+                output.insert(block, at: bodyStart + location)
+                for index in wordIndex..<insertedBefore.count { insertedBefore[index] += block.length }
+            }
+
             for (wordIndex, range) in ranges.enumerated() {
-                let absoluteRange = NSRange(location: bodyStart + range.location, length: range.length)
+                let absoluteRange = NSRange(location: bodyStart + insertedBefore[wordIndex] + range.location, length: range.length)
                 wordRanges.append(
                     TextWordRange(
                         range: absoluteRange,
@@ -145,6 +163,29 @@ private enum TextDocumentBuilder {
             attributedText: output,
             wordRanges: wordRanges
         )
+    }
+
+    /// A small image set into the line of text, centred on it.
+    private static func inlineFigure(_ image: NSImage) -> NSAttributedString {
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = CGRect(x: 0, y: -image.size.height * 0.3, width: image.size.width, height: image.size.height)
+        let inline = NSMutableAttributedString(attachment: attachment)
+        inline.append(NSAttributedString(string: " "))
+        return inline
+    }
+
+    /// A centred image on its own line, scaled to fit the reading column.
+    private static func figureBlock(_ image: NSImage, paragraphStyle: NSParagraphStyle) -> NSAttributedString {
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        let scale = min(1, 620 / max(image.size.width, 1))
+        attachment.bounds = CGRect(x: 0, y: 0, width: image.size.width * scale, height: image.size.height * scale)
+        let block = NSMutableAttributedString(string: "\n")
+        block.append(NSAttributedString(attachment: attachment))
+        block.append(NSAttributedString(string: "\n"))
+        block.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: block.length))
+        return block
     }
 
 
@@ -172,11 +213,11 @@ private final class ClickableDocumentTextView: NSTextView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        defer {
-            super.mouseDown(with: event)
-        }
-
+        // NSTextView tracks the mouse until it is released, so a drag has selected text by now.
+        super.mouseDown(with: event)
         guard
+            event.clickCount == 1,
+            selectedRange().length == 0,
             let layoutManager,
             let textContainer
         else {

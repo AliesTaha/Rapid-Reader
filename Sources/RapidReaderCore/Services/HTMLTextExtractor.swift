@@ -20,25 +20,39 @@ public enum HTMLTextExtractor {
 
     public static func strippedHTML(_ html: String) -> String {
         guard let document = try? SwiftSoup.parse(html) else { return "" }
+        return strippedText(of: document)
+    }
+
+    static func strippedText(of document: Document) -> String {
         clean(document, article: false)
         return text(from: document.body() ?? document)
     }
 
     public static func articleText(_ html: String) -> String {
         guard let document = try? SwiftSoup.parse(html) else { return "" }
+        return articleText(of: document)
+    }
+
+    /// Text of the element most likely to hold the article, after removing page furniture.
+    static func articleText(of document: Document) -> String {
+        text(from: articleRoot(of: document))
+    }
+
+    /// The element most likely to hold the article, after removing page furniture.
+    static func articleRoot(of document: Document) -> Element {
         clean(document, article: true)
         for selector in ["#mw-content-text .mw-parser-output", "article", "main", "[role=main]"] {
             if let candidates = try? document.select(selector),
                let best = candidates.array().max(by: { score($0) < score($1) }), score(best) > 0 {
-                return text(from: best)
+                return best
             }
         }
         // Prefer the container with the most prose and the lowest link density.
         if let containers = try? document.select("div, section"),
            let best = containers.array().max(by: { score($0) < score($1) }), score(best) > 200 {
-            return text(from: best)
+            return best
         }
-        return text(from: document.body() ?? document)
+        return document.body() ?? document
     }
 
     private static func score(_ element: Element) -> Int {

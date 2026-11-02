@@ -36,10 +36,21 @@ struct ReadingOptionsView: View {
 
             OptionSection("Reading") {
                 ToggleRow("Show surrounding words", isOn: $preferences.showContext)
-                ToggleRow("Hide them while playing", isOn: $preferences.focusMode)
-                    .disabled(!preferences.showContext)
                 ToggleRow("Pause at punctuation", isOn: $preferences.pauseOnPunctuation)
                 ToggleRow("Slow down on long words", isOn: $preferences.pauseOnLongWords)
+                ToggleRow("Stop on equations in sentences", isOn: $preferences.stopOnExpressions)
+            }
+
+            OptionSection("Focus") {
+                ToggleRow("Focus mode while playing", isOn: $preferences.focusMode)
+                StepperRow(
+                    title: "Check in every",
+                    value: preferences.checkInMinutes == 0 ? "Off" : "\(preferences.checkInMinutes) min"
+                ) {
+                    Stepper("Check in every", value: $preferences.checkInMinutes, in: 0...30)
+                }
+                ToggleRow("Show section progress", isOn: $preferences.showSectionProgress)
+                ToggleRow("Pulse on each word", isOn: $preferences.rhythmPulse)
             }
 
             OptionSection("Pacing") {
@@ -55,7 +66,7 @@ struct ReadingOptionsView: View {
                 ) {
                     Stepper("Rewind on resume", value: $preferences.resumeRewindWords, in: 0...20)
                 }
-                Text("Warm-up starts at half speed. Long words stay on screen up to 60% longer.")
+                Text("Warm-up starts at half speed. Pauses on long words and punctuation borrow time from short words, so the average stays at your speed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

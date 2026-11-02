@@ -5,6 +5,7 @@ import SwiftUI
 struct ReaderView: View {
     let item: RapidReaderCore.LibraryItem
     @ObservedObject var library: LibraryStore
+    var onFocusChange: (Bool) -> Void = { _ in }
 
     enum ReaderMode: String, CaseIterable, Identifiable {
         case rsvp = "RSVP"
@@ -30,15 +31,25 @@ struct ReaderView: View {
     @State private var speedNotice: Int?
     @State private var speedNoticeTask: Task<Void, Never>?
 
-    init(item: RapidReaderCore.LibraryItem, library: LibraryStore) {
+    init(item: RapidReaderCore.LibraryItem, library: LibraryStore, onFocusChange: @escaping (Bool) -> Void = { _ in }) {
         self.item = item
         self.library = library
+        self.onFocusChange = onFocusChange
         _session = StateObject(wrappedValue: ReaderSession(
             sections: item.sections,
             sectionIndex: item.progress.sectionIndex,
             wordIndex: item.progress.wordIndex,
             preferences: item.preferences
         ))
+    }
+
+    /// Focus mode leaves only the word and the progress bar while playing.
+    private var isFocused: Bool {
+        session.preferences.focusMode && session.isPlaying && readerMode == .rsvp
+    }
+
+    private func toggleFocusMode() {
+        session.preferences.focusMode.toggle()
     }
 
     private var currentSection: BookSection {
@@ -94,8 +105,12 @@ struct ReaderView: View {
             onBack: session.back,
             onForward: session.forward,
             onFaster: { changeSpeed(by: 25) },
-            onSlower: { changeSpeed(by: -25) }
+            onSlower: { changeSpeed(by: -25) },
+            onFocus: toggleFocusMode
         ))
+        .toolbar(isFocused ? .hidden : .visible, for: .windowToolbar)
+        .animation(.easeInOut(duration: 0.35), value: isFocused)
+        .onChange(of: isFocused) { _, focused in onFocusChange(focused) }
         .onAppear {
             session.onProgressChange = { section, word in
                 library.updateProgress(for: item.id, sectionIndex: section, wordIndex: word)
@@ -105,6 +120,7 @@ struct ReaderView: View {
             }
         }
         .onDisappear {
+            onFocusChange(false)
             hideTask?.cancel()
             session.pause()
             library.flushPendingChanges()
@@ -162,9 +178,17 @@ struct ReaderView: View {
             if readerMode == .rsvp {
                 RSVPStage(
                     session: session,
-                    hidesContext: session.preferences.focusMode && session.isPlaying
+                    hidesContext: isFocused,
+                    onContinue: togglePlayback
                 )
                 .padding(.bottom, 110)
+                .overlay(alignment: .top) {
+                    if session.preferences.showSectionProgress {
+                        SectionProgressBar(session: session)
+                            .padding(.horizontal, 40)
+                            .padding(.top, 18)
+                    }
+                }
                 .contentShape(Rectangle())
                 .onTapGesture {
                     // Clicking the reading area gives the reader the keyboard shortcuts.
@@ -178,7 +202,7 @@ struct ReaderView: View {
                     textColor: theme.ink ?? .labelColor,
                     appearance: theme.appearance,
                     bottomInset: 120,
-                    onSelectWord: { section, word in session.jump(toSection: section, word: word) }
+                    onSelectWord: readFrom
                 )
                 .accessibilityIdentifier("full-text-reader")
                 .overlay(alignment: .bottom) {
@@ -223,6 +247,13 @@ struct ReaderView: View {
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
+            Button(action: toggleFocusMode) {
+                Label("Focus mode", systemImage: session.preferences.focusMode ? "scope" : "circle.dashed")
+            }
+            .help(session.preferences.focusMode
+                ? "Focus mode is on: while playing, only the word and progress bar show (F)"
+                : "Focus mode: while playing, hide everything except the word and progress bar (F)")
+
             Menu {
                 ForEach(item.sections.indices, id: \.self) { index in
                     Button {
@@ -285,6 +316,13 @@ struct ReaderView: View {
         session.togglePlayback()
     }
 
+    /// Clicking a word in the text starts word-by-word reading from that word.
+    private func readFrom(section: Int, word: Int) {
+        session.jump(toSection: section, word: word)
+        withAnimation(.smooth(duration: 0.25)) { readerMode = .rsvp }
+        session.play()
+    }
+
     private func changeSpeed(by delta: Int) {
         let speed = min(max(session.preferences.wordsPerMinute + delta, 100), 900)
         session.preferences.wordsPerMinute = speed
@@ -322,18 +360,50 @@ struct ReaderView: View {
 private struct RSVPStage: View {
     @ObservedObject var session: ReaderSession
     let hidesContext: Bool
+    let onContinue: () -> Void
 
     var body: some View {
+        if let figure = session.presentedFigure {
+            FigureCard(figure: figure, onContinue: onContinue)
+                .id(figure.id)
+                .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        } else if session.isCheckingIn {
+            CheckInCard(
+                minutes: session.preferences.checkInMinutes,
+                onContinue: {
+                    NSSound(named: "Pop")?.play()
+                    onContinue()
+                },
+                onRewind: session.rewindAfterCheckIn
+            )
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        } else {
+            wordStage
+        }
+    }
+
+    /// Changes with every word while the rhythm pulse is on and playback runs.
+    private var beat: Beat? {
+        guard session.preferences.rhythmPulse, session.isPlaying else { return nil }
+        return Beat(index: session.displayIndex, duration: min(0.22, session.currentDisplayDuration() * 0.7))
+    }
+
+    private var wordStage: some View {
         VStack(spacing: 28) {
             ZStack {
-                FocusGuides(fontSize: session.preferences.fontSize)
-
                 if session.words.isEmpty {
                     Text("This section has no readable text.")
                         .font(.title3)
                         .foregroundStyle(.secondary)
+                } else if session.currentExpression != nil {
+                    // Expressions stay on one line and shrink to fit rather than wrap.
+                    Text(session.displayWords.joined(separator: " "))
+                        .font(.system(size: session.preferences.fontSize * 0.8, weight: .medium, design: .serif))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.2)
+                        .padding(.horizontal, 32)
                 } else if session.displayWords.count == 1, let word = session.displayWords.first {
-                    PivotWordView(word: word, fontSize: session.preferences.fontSize)
+                    PivotWordView(word: word, fontSize: session.preferences.fontSize, beat: beat)
                 } else {
                     Text(session.displayWords.joined(separator: " "))
                         .font(.system(size: max(36, session.preferences.fontSize * 0.7), weight: .semibold, design: .rounded))
@@ -346,6 +416,15 @@ private struct RSVPStage: View {
             .frame(height: max(150, session.preferences.fontSize * 2.3))
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("rsvp-word-display")
+
+            if session.isHoldingExpression {
+                Button(action: onContinue) {
+                    Label("Continue reading", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.readerAmber)
+                .help("Continue reading (Space)")
+            }
 
             if session.preferences.showContext {
                 ContextLine(words: session.words, index: session.displayIndex)
@@ -361,6 +440,7 @@ private struct RSVPStage: View {
 private struct PivotWordView: View {
     let word: String
     let fontSize: Double
+    let beat: Beat?
 
     var body: some View {
         GeometryReader { proxy in
@@ -371,6 +451,7 @@ private struct PivotWordView: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
                 Text(split.pivot)
                     .foregroundStyle(Color.readerAmberText)
+                    .pulse(on: beat)
                 Text(split.suffix)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -389,21 +470,6 @@ private struct PivotWordView: View {
         let needed = max(measure(split.prefix), measure(split.suffix)) + pivotHalf
         let available = width / 2 - 28
         return needed > available ? fontSize * available / needed : fontSize
-    }
-}
-
-private struct FocusGuides: View {
-    let fontSize: Double
-
-    var body: some View {
-        VStack {
-            Capsule().frame(width: 3, height: 18)
-            Spacer()
-            Capsule().frame(width: 3, height: 18)
-        }
-        .foregroundStyle(Color.readerAmberText.opacity(0.75))
-        .frame(height: max(130, fontSize * 1.9))
-        .accessibilityHidden(true)
     }
 }
 
@@ -435,6 +501,126 @@ private struct ContextLine: View {
         }
         let start = min(index + 1, words.count)
         return words[start..<min(start + 5, words.count)].joined(separator: " ")
+    }
+}
+
+/// One word's beat for the rhythm pulse.
+private struct Beat: Equatable {
+    var index: Int
+    var duration: Double
+}
+
+private extension View {
+    /// Lights up on each new beat with a brief glow and settles back to its normal colour, so
+    /// the eye has a rhythm to follow. Size never changes, so letters keep their spacing.
+    @ViewBuilder
+    func pulse(on beat: Beat?) -> some View {
+        if let beat {
+            keyframeAnimator(initialValue: 0.0, trigger: beat.index) { content, glow in
+                content
+                    .brightness(0.18 * glow)
+                    .shadow(color: Color.readerAmber.opacity(0.85 * glow), radius: 9 * glow)
+            } keyframes: { _ in
+                CubicKeyframe(1.0, duration: beat.duration * 0.2)
+                CubicKeyframe(0.0, duration: beat.duration * 0.8)
+            }
+        } else {
+            self
+        }
+    }
+}
+
+/// Pauses playback every few minutes to ask whether the reader is still following.
+private struct CheckInCard: View {
+    let minutes: Int
+    let onContinue: () -> Void
+    let onRewind: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "eye")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(Color.readerAmberText)
+            Text("Still with me?")
+                .font(.system(.largeTitle, design: .rounded).weight(.semibold))
+            Text("You've read for \(minutes) minutes. Did the last part sink in?")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Button(action: onRewind) {
+                    Label("I drifted, go back", systemImage: "gobackward.30")
+                }
+                .controlSize(.large)
+                .help("Go back about half a minute, to the start of a sentence")
+
+                Button(action: onContinue) {
+                    Label("Yes, keep going", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.readerAmber)
+                .controlSize(.large)
+                .keyboardShortcut(.defaultAction)
+                .help("Keep reading (Space or Return)")
+            }
+            .padding(.top, 6)
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("rsvp-check-in")
+    }
+}
+
+/// The whole document across the top of the stage, one segment per part sized by its length,
+/// filled up to the current word. It stays visible while the controls are hidden.
+private struct SectionProgressBar: View {
+    @ObservedObject var session: ReaderSession
+
+    var body: some View {
+        let sections = session.sections
+        let counts = sections.map { max($0.wordCount, 1) }
+        let total = Double(counts.reduce(0, +))
+        let current = session.sectionIndex
+        let fraction = min(1, Double(session.displayIndex) / Double(max(session.words.count, 1)))
+        VStack(spacing: 6) {
+            GeometryReader { proxy in
+                let gap: CGFloat = sections.count > 120 ? 0 : sections.count > 40 ? 1 : 3
+                let available = max(0, proxy.size.width - gap * CGFloat(max(sections.count - 1, 0)))
+                HStack(spacing: gap) {
+                    ForEach(sections.indices, id: \.self) { index in
+                        let filled = index < current ? 1 : index == current ? fraction : 0
+                        ZStack(alignment: .leading) {
+                            Rectangle().fill(Color.secondary.opacity(index == current ? 0.3 : 0.16))
+                            Rectangle().fill(Color.readerAmber)
+                                .frame(width: available * Double(counts[index]) / total * filled)
+                        }
+                        .frame(width: available * Double(counts[index]) / total)
+                        .contentShape(Rectangle())
+                        .onTapGesture { session.goToSection(index) }
+                        .help(sections[index].title)
+                    }
+                }
+                .clipShape(Capsule())
+            }
+            .frame(height: 4)
+            .frame(maxWidth: 620)
+
+            Text("\(position(current, of: sections.count)) · \(session.remainingSectionSeconds.readerDuration) left in part · \(session.remainingBookSeconds.readerDuration) in total")
+                .font(.caption2)
+                .monospacedDigit()
+                .lineLimit(1)
+                .foregroundStyle(.secondary)
+                .opacity(0.8)
+        }
+        .animation(.linear(duration: 0.2), value: fraction)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Part \(current + 1) of \(sections.count), \(session.remainingBookSeconds.readerDuration) left in total")
+    }
+
+    /// "Part 2 of 5", with the section's own title when it has one.
+    private func position(_ index: Int, of count: Int) -> String {
+        let title = session.currentSection?.title ?? ""
+        let part = "Part \(index + 1) of \(count)"
+        return title.isEmpty || title == "Part \(index + 1)" ? part : "\(part) · \(title)"
     }
 }
 

@@ -227,17 +227,86 @@ public final class LibraryStore: ObservableObject {
 
     private func insertDocument(_ document: ImportedDocument) throws {
         let text = document.sections.map(\.text)
-        if let existing = items.first(where: { $0.sections.map(\.text) == text }) {
+        // The same text with the same figures is already in the library; the same text with
+        // different figures, for example after figures were lost or cropped better, is refreshed below.
+        func sameFigures(_ old: [BookSection]) -> Bool {
+            old.count == document.sections.count && zip(old, document.sections).allSatisfy { before, after in
+                before.figures.count == after.figures.count && zip(before.figures, after.figures).allSatisfy {
+                    $0.kind == $1.kind && $0.text == $1.text && $0.imageData == $1.imageData
+                }
+            }
+        }
+        if let existing = items.first(where: { $0.sections.map(\.text) == text && sameFigures($0.sections) }) {
             selectedID = existing.id
             return
         }
         guard !isPersistenceBlocked else { throw CocoaError(.fileWriteNoPermission) }
+        // Importing a file or link again refreshes its content, for example after the importer
+        // learned to keep figures, and keeps progress and notes.
+        if let source = document.sourceURL,
+           let index = items.firstIndex(where: { $0.sourceURL == source && $0.format == document.format }) {
+            var refreshed = items[index]
+            let position = Self.matchingPosition(refreshed.progress, from: refreshed.sections, in: document.sections)
+            refreshed.sections = document.sections
+            refreshed.coverImageData = document.coverImageData ?? refreshed.coverImageData
+            refreshed.progress.sectionIndex = position.section
+            refreshed.progress.wordIndex = position.word
+            try persistence.writeContent(of: refreshed)
+            var updated = items
+            updated[index] = refreshed
+            try persistence.writeIndex(updated)
+            items = updated
+            selectedID = refreshed.id
+            return
+        }
         let newItem = item(from: document)
         try persistence.writeContent(of: newItem)
         let updated = [newItem] + items
         try persistence.writeIndex(updated)
         items = updated
         selectedID = newItem.id
+    }
+
+    /// Where the reader's place lands in refreshed text: the same run of words if it can be found,
+    /// nearest to where it was, otherwise the same share of the way through the section.
+    static func matchingPosition(_ progress: ReadingProgress, from old: [BookSection], in new: [BookSection]) -> (section: Int, word: Int) {
+        guard !new.isEmpty else { return (0, 0) }
+        let section = min(max(progress.sectionIndex, 0), new.count - 1)
+        guard old.indices.contains(progress.sectionIndex) else { return (section, 0) }
+        let oldWords = TextProcessor.tokenize(old[progress.sectionIndex].text)
+        let start = min(max(progress.wordIndex, 0), oldWords.count)
+        let fraction = oldWords.isEmpty ? 0 : Double(start) / Double(oldWords.count)
+        // A word the importer now writes differently, such as "n2" becoming "n²", breaks a long run,
+        // so shorter runs a little further on are tried too; the place is moved back by their offset.
+        let anchors: [(offset: Int, words: [String])] = [(0, 6), (0, 4), (2, 4), (4, 4), (-4, 4)].compactMap { offset, length in
+            let from = start + offset
+            guard from >= 0, from + length <= oldWords.count else { return nil }
+            return (offset, Array(oldWords[from..<(from + length)]))
+        }
+        // Sections can be added or merged when the importer improves, so the section with the same
+        // title is searched first, then the same position and its neighbours, and with the longest
+        // anchor, every section.
+        let title = old[progress.sectionIndex].title
+        let titled = new.indices.filter { new[$0].title == title }.sorted { abs($0 - section) < abs($1 - section) }
+        for anchor in anchors {
+            let everywhere = anchor.words.count >= 6 ? Array(new.indices) : []
+            var candidates: [Int] = []
+            for candidate in titled + [section, section - 1, section + 1] + everywhere where new.indices.contains(candidate) && !candidates.contains(candidate) {
+                candidates.append(candidate)
+            }
+            for candidate in candidates {
+                let words = TextProcessor.tokenize(new[candidate].text)
+                guard words.count >= anchor.words.count else { continue }
+                let sameSection = titled.contains(candidate) || titled.isEmpty && candidate == section
+                let expected = sameSection ? Int(fraction * Double(words.count)) : (candidate < section ? words.count : 0)
+                let matches = (0...(words.count - anchor.words.count)).filter { Array(words[$0..<($0 + anchor.words.count)]) == anchor.words }
+                if let best = matches.min(by: { abs($0 - expected) < abs($1 - expected) }) {
+                    return (candidate, min(max(best - anchor.offset, 0), words.count - 1))
+                }
+            }
+        }
+        let words = new[section].wordCount
+        return (section, min(Int(fraction * Double(words)), max(words - 1, 0)))
     }
 
     public func updateProgress(for id: UUID, sectionIndex: Int, wordIndex: Int) {
@@ -343,7 +412,8 @@ public final class LibraryStore: ObservableObject {
             let repairedSection = BookSection(
                 id: section.id,
                 title: title,
-                text: TextProcessor.normalizedText(section.text)
+                text: TextProcessor.normalizedText(section.text),
+                figures: section.figures
             )
             return repairedSection.wordCount > 0 ? repairedSection : nil
         }

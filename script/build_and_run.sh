@@ -25,7 +25,7 @@ APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+
 
 cd "$ROOT_DIR"
 
@@ -37,8 +37,8 @@ BUILD_FLAGS=(-c "$CONFIGURATION")
 if [[ "$UNIVERSAL" == "1" ]]; then
   BUILD_FLAGS+=(--arch arm64 --arch x86_64)
 fi
-swift build "${BUILD_FLAGS[@]}"
-BUILD_DIR="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)"
+swift build --disable-automatic-resolution "${BUILD_FLAGS[@]}"
+BUILD_DIR="$(swift build --disable-automatic-resolution "${BUILD_FLAGS[@]}" --show-bin-path)"
 BUILD_BINARY="$BUILD_DIR/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
@@ -47,7 +47,7 @@ cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 
 mkdir -p "$APP_FRAMEWORKS"
-ditto "$BUILD_DIR/Sparkle.framework" "$APP_FRAMEWORKS/Sparkle.framework"
+# Sparkle omitted from local source build.
 
 UPDATE_KEYS=""
 if [[ -n "$SPARKLE_PUBLIC_KEY" ]]; then

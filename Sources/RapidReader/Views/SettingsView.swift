@@ -52,7 +52,7 @@ private struct ReadingDefaultsSettings: View {
     @AppStorage("readerDefaultPauses") private var pauses = true
     @AppStorage("readerDefaultFocus") private var focus = false
     @AppStorage("readerDefaultRamp") private var ramp = 0.0
-    @AppStorage("readerDefaultLongWords") private var longWords = false
+    @AppStorage("readerDefaultLongWords") private var longWords = true
     @AppStorage("readerDefaultRewind") private var rewind = 0
 
     var body: some View {

@@ -11,6 +11,8 @@ struct ContentView: View {
     @State private var showingFailureAlert = false
     @State private var showingStatistics = false
     @State private var isDropTargeted = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+    @State private var visibilityBeforeFocus: NavigationSplitViewVisibility?
     @AppStorage(ReaderTheme.storageKey) private var theme: ReaderTheme = .system
 
     private var visibleItems: [RapidReaderCore.LibraryItem] {
@@ -25,8 +27,21 @@ struct ContentView: View {
         }
     }
 
+    /// Focus mode hides the library while reading and brings it back afterwards.
+    private func setFocused(_ focused: Bool) {
+        withAnimation(.easeInOut(duration: 0.35)) {
+            if focused {
+                if visibilityBeforeFocus == nil { visibilityBeforeFocus = columnVisibility }
+                columnVisibility = .detailOnly
+            } else if let previous = visibilityBeforeFocus {
+                columnVisibility = previous
+                visibilityBeforeFocus = nil
+            }
+        }
+    }
+
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             LibrarySidebarView(
                 items: visibleItems,
                 selectedID: $library.selectedID,
@@ -44,8 +59,9 @@ struct ContentView: View {
             )
         } detail: {
             if let item = library.selectedItem {
-                ReaderView(item: item, library: library)
-                    .id(item.id)
+                // Sections get new IDs when a file is imported again, which reloads the reader.
+                ReaderView(item: item, library: library, onFocusChange: setFocused)
+                    .id("\(item.id)-\(item.sections.first?.id.uuidString ?? "")")
             } else {
                 EmptyLibraryView(
                     onImportFiles: { showingFileImporter = true },

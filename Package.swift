@@ -11,9 +11,8 @@ let package = Package(
         .executable(name: "RapidReader", targets: ["RapidReader"])
     ],
     dependencies: [
-        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.19"),
-        .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.6.0"),
-        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0")
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20"),
+        .package(url: "https://github.com/scinfu/SwiftSoup.git", exact: "2.13.9")
     ],
     targets: [
         .target(
@@ -23,7 +22,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "RapidReader",
-            dependencies: ["RapidReaderCore", .product(name: "Sparkle", package: "Sparkle")],
+            dependencies: ["RapidReaderCore"],
             path: "Sources/RapidReader",
             resources: [
                 .process("Resources")

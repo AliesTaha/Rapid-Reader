@@ -3,19 +3,25 @@ import XCTest
 
 final class ReaderSessionTests: XCTestCase {
     @MainActor
-    func testNavigationClampsAndRestartsCompletedDocument() {
+    func testNavigationMovesBySentenceAndRestartsCompletedDocument() {
         let session = ReaderSession(sections: [
-            BookSection(title: "One", text: "Alpha beta"),
-            BookSection(title: "Two", text: "Gamma delta epsilon")
+            BookSection(title: "One", text: "Alpha beta. Gamma delta epsilon. Zeta"),
+            BookSection(title: "Two", text: "Eta theta")
         ])
         session.back()
         XCTAssertEqual(session.wordIndex, 0)
         session.forward()
+        XCTAssertEqual(session.wordIndex, 2)
+        session.forward()
+        XCTAssertEqual(session.wordIndex, 5)
         session.forward()
         XCTAssertEqual(session.sectionIndex, 1)
         session.back()
         XCTAssertEqual(session.sectionIndex, 0)
-        XCTAssertEqual(session.wordIndex, 1)
+        XCTAssertEqual(session.wordIndex, 5)
+        session.setWordIndex(4)
+        session.back()
+        XCTAssertEqual(session.wordIndex, 0, "two words into a sentence goes to the one before")
         session.jump(toSection: 1, word: 200)
         session.forward()
         XCTAssertTrue(session.isAtEnd)
@@ -37,7 +43,7 @@ final class ReaderSessionTests: XCTestCase {
 
     func testTimingUsesDisplayedChunkAndItsPunctuation() {
         let preferences = ReadingPreferences(wordsPerMinute: 600, chunkSize: 4)
-        XCTAssertEqual(RSVPTiming.displayDuration(for: ["last."], preferences: preferences), 0.18, accuracy: 0.0001)
+        XCTAssertEqual(RSVPTiming.displayDuration(for: ["last."], preferences: preferences), 0.26, accuracy: 0.0001)
         XCTAssertEqual(RSVPTiming.displayDuration(for: ["one", "two"], preferences: preferences), 0.2, accuracy: 0.0001)
     }
 
@@ -88,15 +94,16 @@ final class ReaderSessionTests: XCTestCase {
         XCTAssertLessThan(cached, repeated)
     }
 
-    func testOptionalPacingIsOffByDefaultAndScalesDuration() {
-        let base = ReadingPreferences(wordsPerMinute: 600, pauseOnPunctuation: false)
+    func testOptionalPacingScalesDuration() {
+        XCTAssertTrue(ReadingPreferences().pauseOnLongWords)
+        let base = ReadingPreferences(wordsPerMinute: 600, pauseOnPunctuation: false, pauseOnLongWords: false)
         XCTAssertEqual(RSVPTiming.displayDuration(for: ["extraordinarily"], preferences: base, elapsed: 0), 0.1, accuracy: 0.0001)
 
         var longWords = base
         longWords.pauseOnLongWords = true
         XCTAssertEqual(RSVPTiming.displayDuration(for: ["short"], preferences: longWords), 0.1, accuracy: 0.0001)
-        XCTAssertEqual(RSVPTiming.displayDuration(for: ["extraordinary"], preferences: longWords), 0.125, accuracy: 0.0001)
-        XCTAssertEqual(RSVPTiming.displayDuration(for: ["incomprehensibilities"], preferences: longWords), 0.16, accuracy: 0.0001)
+        XCTAssertEqual(RSVPTiming.displayDuration(for: ["extraordinary"], preferences: longWords), 0.17, accuracy: 0.0001)
+        XCTAssertEqual(RSVPTiming.displayDuration(for: ["incomprehensibilities"], preferences: longWords), 0.22, accuracy: 0.0001)
 
         var warmUp = base
         warmUp.rampUpSeconds = 4

@@ -8,6 +8,7 @@ struct ReaderKeyboardHandler: NSViewRepresentable {
     let onForward: () -> Void
     var onFaster: () -> Void = {}
     var onSlower: () -> Void = {}
+    var onFocus: () -> Void = {}
 
     final class Coordinator {
         var monitor: Any?
@@ -36,6 +37,7 @@ struct ReaderKeyboardHandler: NSViewRepresentable {
             case 124: coordinator.handler.onForward()
             case 126: coordinator.handler.onFaster()
             case 125: coordinator.handler.onSlower()
+            case 3: coordinator.handler.onFocus()
             default: return event
             }
             return nil
