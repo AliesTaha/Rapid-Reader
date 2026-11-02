@@ -1206,7 +1206,7 @@ enum PDFLayoutAnalyzer {
         var box = ink.withoutRules(selection.bounds(for: page).insetBy(dx: 0, dy: -2))
         let subscripts: [Character: Character] = ["0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
             "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ"]
-        let superscripts: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+        let superscripts: [Character: Character] = ["/": "ᐟ", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
             "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ"]
         // The line's baseline is where most of its glyphs end; subscripts and old-style figures
         // such as 7 and 9 reach below it, so the lowest glyph would mislead.
@@ -1316,7 +1316,7 @@ enum PDFLayoutAnalyzer {
             let seatedTop = digits.isEmpty ? max(seated.compactMap { tops[$0] }.max() ?? 0, baseline + size * 0.65) : digits.compactMap { tops[$0] }.sorted()[digits.count / 2]
             // A raised character stands clear of the baseline; an operator on the maths axis, as the
             // minus of "is −2³¹", stands off it too, so a raised one must stand higher.
-            let raised = text.indices.filter { index in
+            var raised = text.indices.filter { index in
                 guard let bottom = bottoms[index] else { return false }
                 return letter(index) ? bottom >= baseline + max(1.5, seatedHeight * 0.3)
                     : "+−-=()".contains(text[index]) && bottom >= baseline + seatedHeight * 0.55
@@ -1330,7 +1330,9 @@ enum PDFLayoutAnalyzer {
                 }
                 // A word, as "nim", has no subscript letters, whatever its last letter measures.
                 let word = String(text.filter(\.isLetter))
-                if !lowered.isEmpty, !(lowered.contains { text[$0].isLetter } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase))),
+                // A function's name takes a subscript, as "logₖ(x)" or "sum_q".
+                let function = word.range(of: #"^(log|min|max|sum|lim)"#, options: .regularExpression) != nil
+                if !lowered.isEmpty, function || !(lowered.contains { text[$0].isLetter } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase))),
                    lowered.allSatisfy({ index in
                     index > 0 && (text[index - 1].isLetter || text[index - 1] == ")" || lowered.contains(index - 1) || text[index - 1].isNumber && lowered.contains(index - 1))
                         && text[index - 1] != " " && !(lowered.contains(index - 1) == false && text[index - 1].isNumber)
@@ -1348,6 +1350,12 @@ enum PDFLayoutAnalyzer {
                 return superscripts[text[index]] != nil && (!letter(index) || height(index) <= seatedHeight * (digits.isEmpty ? 0.85 : 0.8) && height(index) >= seatedHeight * 0.35
                     && (top > seatedTop + 0.5 || top > seatedTop - 0.5 && bottom >= baseline + seatedHeight * 0.45))
             }) else { continue }
+            // An operator between two raised characters, as the "/" of "2ⁿᐟ²" or the "−" of
+            // "2ⁿ⁻¹", is part of the exponent even where it sits low.
+            for index in text.indices where "/−+-".contains(text[index]) && !raised.contains(index)
+                && index > 0 && index + 1 < text.count && raised.contains(index - 1) && raised.contains(index + 1) {
+                raised.append(index)
+            }
             // A raised letter rides on a base, as the "k" of "nᵏ"; one that opens the token, as
             // the "x" of "xᵢ)" over its subscript, only looks raised.
             if raised.contains(where: { text[$0].isLetter && ($0 == 0 || !(text[$0 - 1].isLetter || text[$0 - 1].isNumber || text[$0 - 1] == ")")) }) { continue }
