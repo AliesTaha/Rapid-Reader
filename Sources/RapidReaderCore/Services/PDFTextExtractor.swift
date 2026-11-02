@@ -113,6 +113,25 @@ public enum PDFTextExtractor {
                 }
                 start += 1
             }
+            // A space PDFKit set one letter off, as "willc larify" or "veryc lose", moves back to
+            // where both words are whole.
+            var index = 0
+            while index + 1 < tokens.count {
+                let first = tokens[index], second = tokens[index + 1]
+                let tail = String(second.reversed().prefix { ".,;:!?)”’".contains($0) }.reversed())
+                let body = String(second.dropLast(tail.count))
+                // Lowercase words only, so names and abbreviations such as "et al." stay as they are.
+                func plain(_ token: String) -> Bool { !token.isEmpty && token.allSatisfy { $0.isASCII && $0.isLowercase } }
+                func word(_ token: String) -> Bool { token.count == 2 ? twoLetterWords.contains(token) : token.count > 2 && (WordSplitter.isWord(token) || WordSplitter.prefixed(token)) }
+                guard plain(first), plain(body), first.count >= 2, body.count >= 2,
+                      !word(first) && first.count >= 3 || !word(body) && body.count >= 3 else { index += 1; continue }
+                let shifts = [(String(first.dropLast()), String(first.last!) + body), (first + String(body.first!), String(body.dropFirst()))]
+                if let (left, right) = shifts.first(where: { word($0.0) && word($0.1) && $0.1.dropFirst().allSatisfy(\.isLowercase) }) {
+                    tokens[index] = left
+                    tokens[index + 1] = right + tail
+                }
+                index += 1
+            }
             return tokens.joined(separator: " ")
         }.joined(separator: "\n")
     }

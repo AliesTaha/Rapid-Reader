@@ -48,7 +48,7 @@ enum WordSplitter {
 
     /// A word the dictionary lacks but builds from a prefix, as "hyperparameters" or
     /// "Metalearners", is one word, not "hyper parameters" or "Metal earners".
-    private static func prefixed(_ run: String) -> Bool {
+    static func prefixed(_ run: String) -> Bool {
         let lower = run.lowercased()
         return ["hyper", "meta", "multi", "inter", "intra", "super", "sub", "semi", "pseudo", "non", "pre", "post", "auto", "self", "co", "re", "un", "over", "under", "counter", "cross", "micro", "macro", "mini"]
             .contains { lower.hasPrefix($0) && lower.count - $0.count >= 4 && isWord(String(lower.dropFirst($0.count))) }
