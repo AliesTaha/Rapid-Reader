@@ -2862,7 +2862,19 @@ enum PDFLayoutAnalyzer {
             let placed = CGRect(x: bounds.minX + rect.minX, y: bounds.minY + CGFloat(height) - rect.maxY,
                                 width: min(rect.width, CGFloat(width) - rect.minX), height: rect.height)
             // Wide or tall: a column of nodes joined by an edge is as much a drawing as a row.
-            if rect.height >= 16 && rect.width >= 40 || rect.height >= 40 && rect.width >= 16, count >= 12 {
+            // A column as narrow as one node, as "2" over "5" joined by an edge, counts too when an
+            // unbroken stroke runs down it; a column of leader dots has none.
+            func stroke() -> Bool {
+                for x in Int(rect.minX)..<min(width, Int(rect.maxX)) {
+                    var run = 0
+                    for y in Int(rect.minY)..<min(height, Int(rect.maxY)) {
+                        run = data[y * width + x] < 200 ? run + 1 : 0
+                        if run >= 15 { return true }
+                    }
+                }
+                return false
+            }
+            if rect.height >= 16 && rect.width >= 40 || rect.height >= 40 && (rect.width >= 16 || rect.width >= 10 && stroke()), count >= 12 {
                 // Brackets, commas and descenders reaching past the boxes of lines of text are no
                 // drawing: some of a drawing's ink stands clear of the text.
                 let clear = textRects.filter { $0.intersects(placed) }.map { $0.offsetBy(dx: -bounds.minX, dy: -bounds.minY).insetBy(dx: -2, dy: -3.5) }
