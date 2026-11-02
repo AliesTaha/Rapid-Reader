@@ -3074,7 +3074,17 @@ enum PDFLayoutAnalyzer {
         context.translateBy(x: pageBounds.minX - crop.minX, y: pageBounds.minY - crop.minY)
         page.draw(with: .cropBox, to: context)
         guard let full = context.makeImage() else { return nil }
-        let image = trimmingEdgeSlivers(full, in: context, scale: scale) ?? full
+        let trimmed = trimmingEdgeSlivers(full, in: context, scale: scale) ?? full
+        // A white margin keeps ink off the picture's edges, so a tight crop does not look cut.
+        let margin = Int((scale * 1.5).rounded())
+        var image = trimmed
+        if let padded = CGContext(data: nil, width: trimmed.width + margin * 2, height: trimmed.height + margin * 2, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
+            padded.setFillColor(CGColor(gray: 1, alpha: 1))
+            padded.fill(CGRect(x: 0, y: 0, width: padded.width, height: padded.height))
+            padded.draw(trimmed, in: CGRect(x: margin, y: margin, width: trimmed.width, height: trimmed.height))
+            image = padded.makeImage() ?? trimmed
+        }
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(destination, image, nil)
