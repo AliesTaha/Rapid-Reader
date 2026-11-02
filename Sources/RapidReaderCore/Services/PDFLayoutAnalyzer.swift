@@ -757,6 +757,26 @@ enum PDFLayoutAnalyzer {
                 rect = CGRect(x: rect.minX, y: max(rect.minY, floor), width: rect.width, height: min(rect.maxY, ceiling) - max(rect.minY, floor))
                 guard rect.height >= 4 else { continue }
                 rect = ink.completingGlyphs(rect, left: nil, right: nil)
+                // A fraction right after it, as "ab" over "gcd(a,b)" after "lcm(a,b) =", is part of it.
+                func piece(_ other: Int) -> Bool {
+                    let box = lines[other].bounds, text = lines[other].text
+                    return other != index && lines[other].block == nil && !text.isEmpty && !text.contains(markerPrefix) && text.count <= 12 && !text.contains(" ")
+                        && !isDictionaryWord(String(text.filter(\.isLetter)).lowercased())
+                        && box.minY < own.maxY + lineHeight * 0.8 && box.maxY > own.minY - lineHeight * 0.8
+                }
+                var stacked: [Int] = []
+                if let near = lines.indices.first(where: { piece($0) && lines[$0].bounds.minX >= rect.maxX - 2 && lines[$0].bounds.minX - rect.maxX < 10 }),
+                   let over = lines.indices.first(where: { other in
+                       let a = lines[near].bounds, b = lines[other].bounds
+                       return other != near && piece(other) && min(a.maxX, b.maxX) - max(a.minX, b.minX) >= min(a.width, b.width) * 0.5
+                           && abs(a.midY - b.midY) > min(a.height, b.height) * 0.6
+                   }) {
+                    stacked = [near, over]
+                }
+                if !stacked.isEmpty {
+                    for other in stacked { rect = rect.union(lines[other].bounds); lines[other].text = "" }
+                    rect = ink.completingGlyphs(rect, left: nil, right: nil)
+                }
                 // Labels inside a small drawing, as the "𝑋1 𝑋2" of two circled nodes, take the
                 // drawing: ink beside them that stands taller than the line.
                 let wide = ink.widened(rect)
@@ -2702,6 +2722,30 @@ enum PDFLayoutAnalyzer {
                 blocks[index].firstLine = [blocks[index].firstLine, blocks[other].firstLine].compactMap { $0 }.min()
                 for line in lines.indices where lines[line].block == other { lines[line].block = index }
                 blocks[other].rect = .null
+            }
+        }
+        // A fraction set beside a formula, as "ab" over "gcd(a,b)" after "lcm(a,b) =", is two short
+        // pieces stacked one over the other; both join it.
+        func short(_ line: Line) -> Bool {
+            line.block == nil && !line.text.isEmpty && line.text.count <= 12 && !line.text.contains(" ")
+                && !isDictionaryWord(String(line.text.filter(\.isLetter)).lowercased())
+        }
+        for index in blocks.indices where blocks[index].kind == .formula && !blocks[index].rect.isNull {
+            let rect = blocks[index].rect
+            for top in lines.indices where short(lines[top]) {
+                let upper = lines[top].bounds
+                guard let bottom = lines.indices.first(where: { other in
+                    let lower = lines[other].bounds
+                    return other != top && short(lines[other]) && lower.maxY <= upper.midY && upper.minY - lower.maxY < 8
+                        && min(upper.maxX, lower.maxX) - max(upper.minX, lower.minX) >= min(upper.width, lower.width) * 0.5
+                }) else { continue }
+                let pair = upper.union(lines[bottom].bounds)
+                // Right after the formula, across its middle.
+                guard pair.minX >= rect.maxX - 2, pair.minX - rect.maxX < 10, pair.minY < rect.midY, pair.maxY > rect.midY else { continue }
+                lines[top].block = index
+                lines[bottom].block = index
+                blocks[index].rect = rect.union(pair)
+                break
             }
         }
         // Only small pieces count: a matrix of short rows inside drawn brackets is a whole formula.
