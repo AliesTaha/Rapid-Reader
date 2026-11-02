@@ -2322,9 +2322,19 @@ enum PDFLayoutAnalyzer {
                     let inside = bounds.intersection(rect)
                     let enclosed = !inside.isNull && inside.width * inside.height >= bounds.width * bounds.height * 0.8
                     // A row under the display stays within its width, which prose set from the margin does not.
+                    // A piece of a sentence's row, as the "ζ̄ = …" of "Finally, for ζ̄ = … is an average",
+                    // stays with the sentence.
+                    let sentenceRow = lines.indices.contains { other in
+                        other != index && lines[other].block == nil
+                            && min(lines[other].bounds.maxY, bounds.maxY) - max(lines[other].bounds.minY, bounds.minY) > min(lines[other].bounds.height, bounds.height) * 0.5
+                            && lines[other].text.split(whereSeparator: \.isWhitespace).contains { token in
+                                let letters = wordLetters(token).lowercased()
+                                return letters.count >= 3 && !mathWords.contains(letters) && isDictionaryWord(letters)
+                            }
+                    }
                     let under = bounds.minY < rect.minY && bounds.maxY > rect.minY - height * 0.6
                         && bounds.minX >= rect.minX - 12 && bounds.maxX <= rect.maxX + 12 && lines[index].text.contains("=")
-                    guard enclosed || under else { continue }
+                    guard enclosed || under, !sentenceRow else { continue }
                     lines[index].block = block
                     lines[index].kind = .formula
                     blocks[block].rect = rect.union(bounds)
