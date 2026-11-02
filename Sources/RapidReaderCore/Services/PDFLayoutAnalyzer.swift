@@ -1382,7 +1382,8 @@ enum PDFLayoutAnalyzer {
                 }
                 // A letter with a descender, as the "y" of "y₁", has no glyph on the baseline beside
                 // its index; the line's baseline and type size are the measure then.
-                let hanging = text.count >= 2 && "gpqy".contains(text[0]) && text[1].isNumber
+                let base = text.firstIndex(where: \.isLetter) ?? 0
+                let hanging = base + 1 < text.count && base <= 1 && "gpqy".contains(text[base]) && (text[base + 1].isNumber || text[base + 1].isLetter)
                 guard resting.count >= 2 || hanging else { continue }
                 // An exponent rides on something that sits on the baseline, as the "2" of "2³¹". Its
                 // height is the measure. Ink from the lines above can reach into a letter's columns, so
@@ -1427,11 +1428,12 @@ enum PDFLayoutAnalyzer {
                         if lowered.contains(index + 1) { lowered.append(index); continue }
                         if let bottom = bottoms[index + 1], let top = tops[index + 1], bottom <= level - 0.9, top < seatedTop - seatedHeight * 0.3 { lowered += [index, index + 1] }
                     }
-                    // A word, as "nim", has no subscript letters, whatever its last letter measures.
+                    // A word, as "nim", has no subscript letters, whatever its last letter measures; a list
+                    // with figures as indices, as "a₁,a₂,...,aₖ", has.
                     let word = String(text.filter(\.isLetter))
                     // A function's name takes a subscript, as "logₖ(x)" or "sum_q".
                     let function = word.range(of: #"^(log|min|max|sum|lim)"#, options: .regularExpression) != nil
-                    if !lowered.isEmpty, function || !(lowered.contains { text[$0].isLetter } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase))),
+                    if !lowered.isEmpty, function || !(lowered.contains { text[$0].isLetter } && !lowered.contains { text[$0].isNumber } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase))),
                        lowered.allSatisfy({ index in
                         index > 0 && (text[index - 1].isLetter || text[index - 1] == ")" || lowered.contains(index - 1) || text[index - 1].isNumber && lowered.contains(index - 1))
                             && text[index - 1] != " " && !(lowered.contains(index - 1) == false && text[index - 1].isNumber)
