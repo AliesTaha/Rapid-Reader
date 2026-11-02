@@ -359,6 +359,9 @@ public enum PDFTextExtractor {
                 // the word before it; on its own it would not be read.
                 .replacingOccurrences(of: #"(?<=[\p{L}\p{N})\]}′])[ \t]+([.,;:!?])(?=\s|$)"#, with: "$1", options: .regularExpression)
                 .replacingOccurrences(of: #"(\#(PDFLayoutAnalyzer.markerPrefix)\d+)([.,;:!?])"#, with: "$1 $2", options: .regularExpression)
+                // A label glued to its number, as "Figure3.5:Directed", is spaced.
+                .replacingOccurrences(of: #"\b(Assumption|Figure|Table|Definition|Theorem|Section|Chapter|Equation|Proposition|Lemma|Corollary|Example|Listing)(\d+(?:\.\d+)*)(:?)(?=\p{Lu})"#, with: "$1 $2$3 ", options: .regularExpression)
+                .replacingOccurrences(of: #"\b(Assumption|Figure|Table|Definition|Theorem|Section|Chapter|Equation|Proposition|Lemma|Corollary|Example|Listing)(\d)"#, with: "$1 $2", options: .regularExpression)
                 // A title after a number, as "Assumption 2.1(Ignorability", has its space back.
                 .replacingOccurrences(of: #"(\d)\((\p{Lu}\p{Ll}{2,})"#, with: "$1 ($2", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
