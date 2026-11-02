@@ -527,7 +527,13 @@ public enum PDFTextExtractor {
         var page = page
         for index in page.indices where page[index].hasPrefix(mark) {
             let line = String(page[index].dropFirst(mark.count))
-            guard let match = line.firstMatch(of: /^(\d{1,2}) ?(\p{Lu}[\p{L}’'.]*)/) else { continue }
+            // A mark the layout already raised, as "²J. Bentley’s", stands apart from its note.
+            if let match = line.firstMatch(of: /^([⁰¹²³⁴⁵⁶⁷⁸⁹]{1,2})(\p{Lu})/) {
+                page[index] = mark + match.output.1 + " " + line.dropFirst(match.output.1.count)
+                numbers.insert(String(match.output.1.compactMap { mark in raised.first { $0.value == mark }?.key }))
+                continue
+            }
+            guard let match = line.firstMatch(of: /^([0-9]{1,2}) ?(\p{Lu}[\p{L}’'.]*)/) else { continue }
             let number = String(match.output.1)
             numbers.insert(number)
             page[index] = mark + up(number) + " " + line.dropFirst(number.count).drop { $0 == " " }

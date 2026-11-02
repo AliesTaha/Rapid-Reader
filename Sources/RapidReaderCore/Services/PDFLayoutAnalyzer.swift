@@ -1205,14 +1205,14 @@ enum PDFLayoutAnalyzer {
         // A frame's rule just above or below the line would join every column into one.
         var box = ink.withoutRules(selection.bounds(for: page).insetBy(dx: 0, dy: -2))
         let subscripts: [Character: Character] = ["0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
-            "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ"]
+            "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ"]
         let superscripts: [Character: Character] = ["/": "ᐟ", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
             "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ"]
         // The line's baseline is where most of its glyphs end; subscripts and old-style figures
         // such as 7 and 9 reach below it, so the lowest glyph would mislead.
         let lineBottoms = ink.glyphColumns(in: box).compactMap { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: box.minY, width: $0.upperBound - $0.lowerBound, height: box.height)) }
         let tally = Dictionary(grouping: lineBottoms.map { ($0 * 2).rounded() / 2 }, by: { $0 }).mapValues(\.count)
-        guard var baseline = tally.max(by: { $0.value < $1.value })?.key, tally[baseline, default: 0] >= 3 else { return [:] }
+        guard var baseline = tally.max(by: { ($0.value, $0.key) < ($1.value, $1.key) })?.key, tally[baseline, default: 0] >= 3 else { return [:] }
         // Glyphs are measured between the lowest a descender reaches and the highest an exponent
         // does, at the size most of the line is set in; the lines above and below can reach into
         // the line's box.
@@ -1222,7 +1222,7 @@ enum PDFLayoutAnalyzer {
                 if let size = (font as? NSFont)?.pointSize { sizes[size, default: 0] += range.length }
             }
         }
-        guard let size = sizes.max(by: { $0.value < $1.value })?.key, size > 0 else { return [:] }
+        guard let size = sizes.max(by: { ($0.value, $0.key) < ($1.value, $1.key) })?.key, size > 0 else { return [:] }
         // PDFKit can stretch the box of a line with exponents over half the next line; the line's
         // own ink is the band the box does not cut.
         if box.height > size * 1.6, let own = ink.rowBands(in: box).filter({ $0.lowerBound > box.minY + 0.5 && $0.upperBound < box.maxY - 0.5 }).max(by: { $0.upperBound - $0.lowerBound < $1.upperBound - $1.lowerBound }),
@@ -1230,13 +1230,14 @@ enum PDFLayoutAnalyzer {
             box = CGRect(x: box.minX, y: own.lowerBound - 1, width: box.width, height: own.upperBound - own.lowerBound + 2)
             let bottoms = ink.glyphColumns(in: box).compactMap { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: box.minY, width: $0.upperBound - $0.lowerBound, height: box.height)) }
             let tally = Dictionary(grouping: bottoms.map { ($0 * 2).rounded() / 2 }, by: { $0 }).mapValues(\.count)
-            guard let found = tally.max(by: { $0.value < $1.value }), found.value >= 3 else { return [:] }
+            guard let found = tally.max(by: { ($0.value, $0.key) < ($1.value, $1.key) }), found.value >= 3 else { return [:] }
             baseline = found.key
         }
         let low = max(box.minY, baseline - size * 0.3), high = min(box.maxY, baseline + size * 0.95)
         guard high - low > size * 0.6 else { return [:] }
         let band = CGRect(x: box.minX, y: low, width: box.width, height: high - low)
         var result: [String: String] = [:]
+        var fine: (FineInk, CGFloat)??
         // A citation such as "[46]:" holds no exponent, whatever its old-style figures look like.
         for whole in line.ranges(of: /\S+/) where line[whole].count >= 2 && candidate(line[whole])
             && line[whole].wholeMatch(of: /\[\d+(,\s*\d+)*\][:,.;]?/) == nil {
@@ -1248,7 +1249,7 @@ enum PDFLayoutAnalyzer {
               while end > range.lowerBound, ",.;:".contains(line[line.index(before: end)]) { end = line.index(before: end) }
               return end < range.upperBound && line.distance(from: range.lowerBound, to: end) >= 2 ? [range, range.lowerBound..<end] : [range]
           }
-          for token in trimmed(whole) + (opened.map(trimmed) ?? []) where candidate(line[token]) {
+          tokens: for token in trimmed(whole) + (opened.map(trimmed) ?? []) where candidate(line[token]) {
             let text = Array(line[token])
             // Each glyph is a run of inked columns in the token's box; character positions are not
             // trusted, so the glyphs must match the characters one for one.
@@ -1292,93 +1293,130 @@ enum PDFLayoutAnalyzer {
                     }
                 }
             }
-            guard glyphs.count == text.count else { continue }
-            let bottoms: [CGFloat?] = glyphs.map { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: band.minY, width: $0.upperBound - $0.lowerBound, height: band.height)) }
-            let tops: [CGFloat?] = glyphs.map { ink.highestInk(in: CGRect(x: $0.lowerBound, y: band.minY, width: $0.upperBound - $0.lowerBound, height: band.height)) }
-            func height(_ index: Int) -> CGFloat { (tops[index] ?? 0) - (bottoms[index] ?? 0) }
-            // The baseline is where letters and digits without descenders sit.
-            let resting = text.indices.compactMap { index -> CGFloat? in
-                guard text[index].isNumber || text[index].isLetter && !"gjpqyQ".contains(text[index]) else { return nil }
-                return bottoms[index]
-            }
-            guard resting.count >= 2 else { continue }
-            // An exponent rides on something that sits on the baseline, as the "2" of "2³¹". Its
-            // height is the measure. Ink from the lines above can reach into a letter's columns, so
-            // digits are preferred, at their middle height; letters run from x-height to capitals,
-            // so the tallest is taken.
-            func letter(_ index: Int) -> Bool { text[index].isNumber || text[index].isLetter }
-            let seated = text.indices.filter { letter($0) && bottoms[$0].map { abs($0 - baseline) <= 1 } == true }
-            let digits = seated.filter { text[$0].isNumber }
-            guard !seated.isEmpty else { continue }
-            // Letters of x-height alone, as the "n" of "n³", understate it; a figure is about two
-            // thirds of the type size.
-            let seatedHeight = digits.isEmpty ? max(seated.map(height).max()!, size * 0.65) : digits.map(height).sorted()[digits.count / 2]
-            let seatedTop = digits.isEmpty ? max(seated.compactMap { tops[$0] }.max() ?? 0, baseline + size * 0.65) : digits.compactMap { tops[$0] }.sorted()[digits.count / 2]
-            // A raised character stands clear of the baseline; an operator on the maths axis, as the
-            // minus of "is −2³¹", stands off it too, so a raised one must stand higher.
-            var raised = text.indices.filter { index in
-                guard let bottom = bottoms[index] else { return false }
-                return letter(index) ? bottom >= baseline + max(1.5, seatedHeight * 0.3)
-                    : "+−-=()".contains(text[index]) && bottom >= baseline + seatedHeight * 0.55
-            }
-            // A subscript, as the "1" of "a1" or the "i" of "xi", sits below the baseline and stays
-            // under the tops of its base; letters that reach down anyway, as "p", are left out.
-            if raised.isEmpty {
-                let lowered = text.indices.filter { index in
-                    guard letter(index), let bottom = bottoms[index], let top = tops[index], subscripts[text[index]] != nil else { return false }
-                    return bottom <= baseline - max(1, seatedHeight * 0.2) && top < seatedTop - seatedHeight * 0.3 && height(index) <= seatedHeight * 0.8
+            // Glyphs that touch at one pixel per point, as the "g2" of "log₂(n)", or that sit only a
+            // point off the baseline, as the "i" of "aᵢ", are measured again on the line drawn finer.
+            let coarse = glyphs
+            for pass in 0..<2 {
+                var glyphs = coarse, level = baseline
+                var measured: [(span: Range<CGFloat>, bottom: CGFloat, top: CGFloat)]?
+                if pass == 1 {
+                    // A line of mathematics is cropped whole, and so is mathematics with accents in a
+                    // sentence, as "(µ̂₀, π̂b)", so their text is left as it is.
+                    guard !looksLikeMath(line), !line.contains(where: { "ˆ¯˜˙".contains($0) }) else { break }
+                    if fine == nil {
+                        fine = .some(FineInk(page: page, pageBounds: ink.bounds, rect: band.insetBy(dx: -2, dy: 0)).flatMap { map in
+                            // Round glyphs dip a little below it, so of two levels as common the higher is taken;
+                            // the baseline is then the middle of the glyphs that end about there.
+                            let bottoms = map.glyphs(in: band).map(\.bottom)
+                            let tally = Dictionary(grouping: bottoms.map { ($0 * 2).rounded() / 2 }, by: { $0 }).mapValues(\.count)
+                            guard let mode = tally.max(by: { ($0.value, $0.key) < ($1.value, $1.key) }), mode.value >= 3 else { return nil }
+                            let near = bottoms.filter { abs($0 - mode.key) <= 0.5 }.sorted()
+                            return (map, near[near.count / 2])
+                        })
+                    }
+                    guard let (map, fineBaseline) = fine ?? nil else { break }
+                    let found = map.glyphs(in: CGRect(x: tokenBox.minX - 0.5, y: band.minY, width: tokenBox.width + 1, height: band.height))
+                    glyphs = found.map(\.span)
+                    measured = found
+                    level = fineBaseline
                 }
-                // A word, as "nim", has no subscript letters, whatever its last letter measures.
-                let word = String(text.filter(\.isLetter))
-                // A function's name takes a subscript, as "logₖ(x)" or "sum_q".
-                let function = word.range(of: #"^(log|min|max|sum|lim)"#, options: .regularExpression) != nil
-                if !lowered.isEmpty, function || !(lowered.contains { text[$0].isLetter } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase))),
-                   lowered.allSatisfy({ index in
-                    index > 0 && (text[index - 1].isLetter || text[index - 1] == ")" || lowered.contains(index - 1) || text[index - 1].isNumber && lowered.contains(index - 1))
-                        && text[index - 1] != " " && !(lowered.contains(index - 1) == false && text[index - 1].isNumber)
-                }) {
-                    var written = text
-                    for index in lowered { written[index] = subscripts[text[index]]! }
-                    result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
-                    break
+                guard glyphs.count == text.count else { continue }
+                let bottoms: [CGFloat?] = measured?.map(\.bottom) ?? glyphs.map { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: band.minY, width: $0.upperBound - $0.lowerBound, height: band.height)) }
+                let tops: [CGFloat?] = measured?.map(\.top) ?? glyphs.map { ink.highestInk(in: CGRect(x: $0.lowerBound, y: band.minY, width: $0.upperBound - $0.lowerBound, height: band.height)) }
+                func height(_ index: Int) -> CGFloat { (tops[index] ?? 0) - (bottoms[index] ?? 0) }
+                // The baseline is where letters and digits without descenders sit.
+                let resting = text.indices.compactMap { index -> CGFloat? in
+                    guard text[index].isNumber || text[index].isLetter && !"gjpqyQ".contains(text[index]) else { return nil }
+                    return bottoms[index]
                 }
+                guard resting.count >= 2 else { continue }
+                // An exponent rides on something that sits on the baseline, as the "2" of "2³¹". Its
+                // height is the measure. Ink from the lines above can reach into a letter's columns, so
+                // digits are preferred, at their middle height; letters run from x-height to capitals,
+                // so the tallest is taken.
+                func letter(_ index: Int) -> Bool { text[index].isNumber || text[index].isLetter }
+                let seated = text.indices.filter { letter($0) && bottoms[$0].map { abs($0 - level) <= 1 } == true }
+                let digits = seated.filter { text[$0].isNumber }
+                guard !seated.isEmpty else { continue }
+                // Letters of x-height alone, as the "n" of "n³", understate it; a figure is about two
+                // thirds of the type size.
+                let seatedHeight = digits.isEmpty ? max(seated.map(height).max()!, size * 0.65) : digits.map(height).sorted()[digits.count / 2]
+                let seatedTop = digits.isEmpty ? max(seated.compactMap { tops[$0] }.max() ?? 0, level + size * 0.65) : digits.compactMap { tops[$0] }.sorted()[digits.count / 2]
+                // A raised character stands clear of the baseline; an operator on the maths axis, as the
+                // minus of "is −2³¹", stands off it too, so a raised one must stand higher.
+                var raised = text.indices.filter { index in
+                    guard let bottom = bottoms[index] else { return false }
+                    return letter(index) ? bottom >= level + max(1.5, seatedHeight * 0.3)
+                        : "+−-=()".contains(text[index]) && bottom >= level + seatedHeight * 0.55
+                }
+                // A subscript, as the "1" of "a1" or the "i" of "xi", sits below the baseline and stays
+                // under the tops of its base; letters that reach down anyway, as "p", are left out.
+                if raised.isEmpty {
+                    var lowered = text.indices.filter { index in
+                        guard letter(index), !"jp".contains(text[index]), let bottom = bottoms[index], let top = tops[index], subscripts[text[index]] != nil else { return false }
+                        // Drawn finer, a drop of a point is measured, not a pixel's rounding.
+                        return bottom <= level - (measured == nil ? max(1, seatedHeight * 0.2) : max(0.9, seatedHeight * 0.14)) && top < seatedTop - seatedHeight * 0.3 && height(index) <= seatedHeight * 0.86
+                    }
+                    // Letters with descenders reach down anyway; one goes on a subscript, as the "j" of
+                    // "Gₙⱼ", when it stays as low as the letter before it.
+                    for index in text.indices where "jp".contains(text[index]) && lowered.contains(index - 1) {
+                        if let top = tops[index], let before = tops[index - 1], top <= before + seatedHeight * 0.2 { lowered.append(index) }
+                    }
+                    // A word, as "nim", has no subscript letters, whatever its last letter measures.
+                    let word = String(text.filter(\.isLetter))
+                    // A function's name takes a subscript, as "logₖ(x)" or "sum_q".
+                    let function = word.range(of: #"^(log|min|max|sum|lim)"#, options: .regularExpression) != nil
+                    if !lowered.isEmpty, function || !(lowered.contains { text[$0].isLetter } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase))),
+                       lowered.allSatisfy({ index in
+                        index > 0 && (text[index - 1].isLetter || text[index - 1] == ")" || lowered.contains(index - 1) || text[index - 1].isNumber && lowered.contains(index - 1))
+                            && text[index - 1] != " " && !(lowered.contains(index - 1) == false && text[index - 1].isNumber)
+                    }) {
+                        var written = text
+                        for index in lowered { written[index] = subscripts[text[index]]! }
+                        result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
+                        break tokens
+                    }
+                }
+                // Letters drawn finer are read for subscripts only; a raised one, as the "e" of an
+                // inline "Pᵉ", is mathematics the line's crop shows.
+                if measured != nil, !text.contains(where: \.isNumber) { continue }
+                // It is set smaller and reaches above it, or, measured in whole points, as high when it
+                // stands well clear of the baseline; a speck of ink from the line above is not a character.
+                guard !raised.isEmpty, raised.contains(where: letter), raised.allSatisfy({ index in
+                    guard let bottom = bottoms[index], let top = tops[index] else { return false }
+                    return superscripts[text[index]] != nil && (!letter(index) || height(index) <= seatedHeight * (digits.isEmpty ? 0.85 : 0.8) && height(index) >= seatedHeight * 0.35
+                        && (top > seatedTop + 0.5 || top > seatedTop - 0.5 && bottom >= level + seatedHeight * 0.45))
+                }) else { continue }
+                // An operator between two raised characters, as the "/" of "2ⁿᐟ²" or the "−" of
+                // "2ⁿ⁻¹", is part of the exponent even where it sits low.
+                for index in text.indices where "/−+-".contains(text[index]) && !raised.contains(index)
+                    && index > 0 && index + 1 < text.count && raised.contains(index - 1) && raised.contains(index + 1) {
+                    raised.append(index)
+                }
+                // A raised letter rides on a base, as the "k" of "nᵏ"; one that opens the token, as
+                // the "x" of "xᵢ)" over its subscript, only looks raised.
+                if raised.contains(where: { text[$0].isLetter && ($0 == 0 || !(text[$0 - 1].isLetter || text[$0 - 1].isNumber || text[$0 - 1] == ")")) }) { continue }
+                // An exponent that goes on unraised, as the "/" of "2^(n/2)" or the "−" of "2^(n−1)", is
+                // only partly seen; the token is left as it is.
+                if raised.contains(where: { index in
+                    let before = index > 0 ? text[index - 1] : " "
+                    return !raised.contains(index - 1) && (before == "/" || before.isNumber && index > 1 && text[index - 2] == ")" || "−+-".contains(before) && index > 1 && (text[index - 2].isLetter || text[index - 2].isNumber))
+                        || index + 1 < text.count && !raised.contains(index + 1) && text[index + 1] == "/"
+                }) { continue }
+                // Raised characters that open a token mark a footnote on the word they precede, as in
+                // "¹Cornell"; before a digit, as the "1" of "17M" would be, they are misread ink.
+                if raised.contains(text.startIndex), let first = text.indices.first(where: { !raised.contains($0) }), !text[first].isLetter { continue }
+                var lifted = raised
+                // A two-figure power of ten, as "10³⁸", is raised whole when its last figure is.
+                if let ten = String(text).range(of: #"10\d\d"#, options: .regularExpression) {
+                    let start = String(text).distance(from: String(text).startIndex, to: ten.lowerBound)
+                    if lifted.contains(start + 3), !lifted.contains(start + 2) { lifted.append(start + 2) }
+                }
+                var written = text
+                for index in lifted { written[index] = superscripts[text[index]]! }
+                result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
+                break tokens
             }
-            // It is set smaller and reaches above it, or, measured in whole points, as high when it
-            // stands well clear of the baseline; a speck of ink from the line above is not a character.
-            guard !raised.isEmpty, raised.contains(where: letter), raised.allSatisfy({ index in
-                guard let bottom = bottoms[index], let top = tops[index] else { return false }
-                return superscripts[text[index]] != nil && (!letter(index) || height(index) <= seatedHeight * (digits.isEmpty ? 0.85 : 0.8) && height(index) >= seatedHeight * 0.35
-                    && (top > seatedTop + 0.5 || top > seatedTop - 0.5 && bottom >= baseline + seatedHeight * 0.45))
-            }) else { continue }
-            // An operator between two raised characters, as the "/" of "2ⁿᐟ²" or the "−" of
-            // "2ⁿ⁻¹", is part of the exponent even where it sits low.
-            for index in text.indices where "/−+-".contains(text[index]) && !raised.contains(index)
-                && index > 0 && index + 1 < text.count && raised.contains(index - 1) && raised.contains(index + 1) {
-                raised.append(index)
-            }
-            // A raised letter rides on a base, as the "k" of "nᵏ"; one that opens the token, as
-            // the "x" of "xᵢ)" over its subscript, only looks raised.
-            if raised.contains(where: { text[$0].isLetter && ($0 == 0 || !(text[$0 - 1].isLetter || text[$0 - 1].isNumber || text[$0 - 1] == ")")) }) { continue }
-            // An exponent that goes on unraised, as the "/" of "2^(n/2)" or the "−" of "2^(n−1)", is
-            // only partly seen; the token is left as it is.
-            if raised.contains(where: { index in
-                let before = index > 0 ? text[index - 1] : " "
-                return !raised.contains(index - 1) && (before == "/" || before.isNumber && index > 1 && text[index - 2] == ")" || "−+-".contains(before) && index > 1 && (text[index - 2].isLetter || text[index - 2].isNumber))
-                    || index + 1 < text.count && !raised.contains(index + 1) && text[index + 1] == "/"
-            }) { continue }
-            // Raised characters that open a token mark a footnote on the word they precede, as in
-            // "¹Cornell"; before a digit, as the "1" of "17M" would be, they are misread ink.
-            if raised.contains(text.startIndex), let first = text.indices.first(where: { !raised.contains($0) }), !text[first].isLetter { continue }
-            var lifted = raised
-            // A two-figure power of ten, as "10³⁸", is raised whole when its last figure is.
-            if let ten = String(text).range(of: #"10\d\d"#, options: .regularExpression) {
-                let start = String(text).distance(from: String(text).startIndex, to: ten.lowerBound)
-                if lifted.contains(start + 3), !lifted.contains(start + 2) { lifted.append(start + 2) }
-            }
-            var written = text
-            for index in lifted { written[index] = superscripts[text[index]]! }
-            result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
-            break
           }
         }
         return result
@@ -1399,7 +1437,7 @@ enum PDFLayoutAnalyzer {
                 if let size = (font as? NSFont)?.pointSize { sizes[size, default: 0] += range.length }
             }
         }
-        guard let size = sizes.max(by: { $0.value < $1.value })?.key, size > 0 else { return [:] }
+        guard let size = sizes.max(by: { ($0.value, $0.key) < ($1.value, $1.key) })?.key, size > 0 else { return [:] }
         var box = ink.withoutRules(selection.bounds(for: page).insetBy(dx: 0, dy: -2))
         // A box stretched over the next line is cut to the band of ink that is the line's own.
         if box.height > size * 1.6, let own = ink.rowBands(in: box).filter({ $0.lowerBound > box.minY + 0.5 && $0.upperBound < box.maxY - 0.5 }).max(by: { $0.upperBound - $0.lowerBound < $1.upperBound - $1.lowerBound }),
@@ -1410,7 +1448,7 @@ enum PDFLayoutAnalyzer {
         let bottoms = ink.glyphColumns(in: box).compactMap { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: box.minY, width: $0.upperBound - $0.lowerBound, height: box.height)) }
             .filter { $0 > box.minY + 0.5 }
         let tally = Dictionary(grouping: bottoms.map { ($0 * 2).rounded() / 2 }, by: { $0 }).mapValues(\.count)
-        guard let baseline = tally.max(by: { $0.value < $1.value })?.key, tally[baseline, default: 0] >= 3 else { return [:] }
+        guard let baseline = tally.max(by: { ($0.value, $0.key) < ($1.value, $1.key) })?.key, tally[baseline, default: 0] >= 3 else { return [:] }
         let tokens = Array(line.ranges(of: /\S+/))
         func bounds(_ token: Range<String.Index>) -> CGRect? {
             let local = NSRange(token, in: line)
@@ -3177,6 +3215,75 @@ enum PDFLayoutAnalyzer {
         guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(destination, image, nil)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+}
+
+/// One strip of the page drawn four times finer than `InkMap`, where glyphs that touch at one
+/// pixel per point, as the "g" and subscript "2" of "log₂", come apart.
+private struct FineInk {
+    let pixels: [UInt8]
+    let width: Int
+    let height: Int
+    let rect: CGRect
+    let scale: CGFloat = 4
+
+    init?(page: PDFPage, pageBounds: CGRect, rect: CGRect) {
+        let width = Int((rect.width * 4).rounded(.up)), height = Int((rect.height * 4).rounded(.up))
+        guard width > 0, height > 0, width * height <= 2_000_000,
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue),
+              let data = context.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.scaleBy(x: 4, y: 4)
+        context.translateBy(x: pageBounds.minX - rect.minX, y: pageBounds.minY - rect.minY)
+        page.draw(with: .cropBox, to: context)
+        self.pixels = Array(UnsafeBufferPointer(start: data, count: width * height))
+        self.width = width
+        self.height = height
+        self.rect = rect
+    }
+
+    /// The glyphs in `area` as runs of connected ink, left to right, with where their ink ends
+    /// below and above. Pieces stacked over one another, as the dot of an "i" or the bars of "=",
+    /// are one glyph.
+    func glyphs(in area: CGRect) -> [(span: Range<CGFloat>, bottom: CGFloat, top: CGFloat)] {
+        let left = max(0, Int(((area.minX - rect.minX) * scale).rounded())), right = min(width - 1, Int(((area.maxX - rect.minX) * scale).rounded()) - 1)
+        let top = max(0, Int(((rect.maxY - area.maxY) * scale).rounded())), bottom = min(height - 1, Int(((rect.maxY - area.minY) * scale).rounded()) - 1)
+        guard left <= right, top <= bottom else { return [] }
+        var seen = Set<Int>()
+        var pieces: [(minX: Int, maxX: Int, minRow: Int, maxRow: Int)] = []
+        for row in top...bottom {
+            for column in left...right where pixels[row * width + column] < 160 && !seen.contains(row * width + column) {
+                var stack = [row * width + column], piece = (minX: column, maxX: column, minRow: row, maxRow: row)
+                seen.insert(row * width + column)
+                while let next = stack.popLast() {
+                    let y = next / width, x = next % width
+                    piece = (min(piece.minX, x), max(piece.maxX, x), min(piece.minRow, y), max(piece.maxRow, y))
+                    for dy in -1...1 { for dx in -1...1 {
+                        let ny = y + dy, nx = x + dx
+                        guard ny >= top, ny <= bottom, nx >= left, nx <= right, pixels[ny * width + nx] < 160, !seen.contains(ny * width + nx) else { continue }
+                        seen.insert(ny * width + nx)
+                        stack.append(ny * width + nx)
+                    } }
+                }
+                // Specks of a pixel or two are antialiasing, not glyphs.
+                if (piece.maxX - piece.minX + 1) * (piece.maxRow - piece.minRow + 1) > 2 { pieces.append(piece) }
+            }
+        }
+        pieces.sort { $0.minX < $1.minX }
+        var merged: [(minX: Int, maxX: Int, minRow: Int, maxRow: Int)] = []
+        for piece in pieces {
+            if let last = merged.last, min(last.maxX, piece.maxX) - max(last.minX, piece.minX) + 1 >= (min(last.maxX - last.minX, piece.maxX - piece.minX) + 1) / 2 {
+                merged[merged.count - 1] = (min(last.minX, piece.minX), max(last.maxX, piece.maxX), min(last.minRow, piece.minRow), max(last.maxRow, piece.maxRow))
+            } else {
+                merged.append(piece)
+            }
+        }
+        return merged.map { piece in
+            ((rect.minX + CGFloat(piece.minX) / scale)..<(rect.minX + CGFloat(piece.maxX + 1) / scale),
+             rect.maxY - CGFloat(piece.maxRow + 1) / scale, rect.maxY - CGFloat(piece.minRow) / scale)
+        }
     }
 }
 
