@@ -203,7 +203,7 @@ public enum TextProcessor {
     private static func containsReadableScalar(_ token: String) -> Bool {
         token.unicodeScalars.contains { scalar in
             CharacterSet.alphanumerics.contains(scalar) || scalar.properties.generalCategory == .mathSymbol
-                || "∅∞&%#√∑∏∫∂∇∀∃⋯".unicodeScalars.contains(scalar)
+                || "∅∞&%#√∑∏∫∂∇∀∃⋯/".unicodeScalars.contains(scalar)
         }
     }
 

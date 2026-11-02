@@ -359,6 +359,8 @@ public enum PDFTextExtractor {
                 // the word before it; on its own it would not be read.
                 .replacingOccurrences(of: #"(?<=[\p{L}\p{N})\]}′])[ \t]+([.,;:!?])(?=\s|$)"#, with: "$1", options: .regularExpression)
                 .replacingOccurrences(of: #"(\#(PDFLayoutAnalyzer.markerPrefix)\d+)([.,;:!?])"#, with: "$1 $2", options: .regularExpression)
+                // A title after a number, as "Assumption 2.1(Ignorability", has its space back.
+                .replacingOccurrences(of: #"(\d)\((\p{Lu}\p{Ll}{2,})"#, with: "$1 ($2", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
                 .replacingOccurrences(of: #"·\s?·\s?·"#, with: "⋯", options: .regularExpression)
                 // A web address broken after a slash goes on without a space.
