@@ -1158,7 +1158,12 @@ enum PDFLayoutAnalyzer {
     /// whose ink stands clearly above the rest of the token are written as superscripts: "O(n²)",
     /// "2³¹ − 1".
     private static func raisedTokens(in line: String, selection: PDFSelection, page: PDFPage, ink: InkMap) -> [String: String] {
-        guard line.contains(where: \.isNumber), selection.numberOfTextRanges(on: page) == 1, let raw = selection.string,
+        // A letter can be raised too, as the "k" of "O(nᵏ)" or the "n" of "xⁿ"; such tokens are no words.
+        func candidate(_ token: Substring) -> Bool {
+            token.contains(where: \.isNumber) || (2...7).contains(token.count) && token.contains(where: \.isLetter)
+                && !isDictionaryWord(String(token.filter(\.isLetter)).lowercased()) && token.filter(\.isLetter).count <= 4
+        }
+        guard line.split(separator: " ").contains(where: candidate), selection.numberOfTextRanges(on: page) == 1, let raw = selection.string,
               raw.trimmingCharacters(in: .whitespacesAndNewlines) == line else { return [:] }
         let lineRange = selection.range(at: 0, on: page)
         guard lineRange.location != NSNotFound else { return [:] }
@@ -1197,7 +1202,7 @@ enum PDFLayoutAnalyzer {
         let band = CGRect(x: box.minX, y: low, width: box.width, height: high - low)
         var result: [String: String] = [:]
         // A citation such as "[46]:" holds no exponent, whatever its old-style figures look like.
-        for whole in line.ranges(of: /\S+/) where line[whole].count >= 2 && line[whole].contains(where: \.isNumber)
+        for whole in line.ranges(of: /\S+/) where line[whole].count >= 2 && candidate(line[whole])
             && line[whole].wholeMatch(of: /\[\d+(,\s*\d+)*\][:,.;]?/) == nil {
           // Glyphs that touch, as the "O(" of "O(n²)", are measured without what comes before the bracket.
           let opened = line[whole].firstIndex(of: "(").map { line.index(after: $0) }.flatMap { $0 < whole.upperBound && line[$0...].first?.isWhitespace == false ? $0..<whole.upperBound : nil }
@@ -1207,7 +1212,7 @@ enum PDFLayoutAnalyzer {
               while end > range.lowerBound, ",.;:".contains(line[line.index(before: end)]) { end = line.index(before: end) }
               return end < range.upperBound && line.distance(from: range.lowerBound, to: end) >= 2 ? [range, range.lowerBound..<end] : [range]
           }
-          for token in trimmed(whole) + (opened.map(trimmed) ?? []) where line[token].contains(where: \.isNumber) {
+          for token in trimmed(whole) + (opened.map(trimmed) ?? []) where candidate(line[token]) {
             let text = Array(line[token])
             // Each glyph is a run of inked columns in the token's box; character positions are not
             // trusted, so the glyphs must match the characters one for one.
@@ -1287,6 +1292,9 @@ enum PDFLayoutAnalyzer {
                 return superscripts[text[index]] != nil && (!letter(index) || height(index) <= seatedHeight * (digits.isEmpty ? 0.85 : 0.8) && height(index) >= seatedHeight * 0.35
                     && (top > seatedTop + 0.5 || top > seatedTop - 0.5 && bottom >= baseline + seatedHeight * 0.45))
             }) else { continue }
+            // A raised letter rides on a base, as the "k" of "nᵏ"; one that opens the token, as
+            // the "x" of "xᵢ)" over its subscript, only looks raised.
+            if raised.contains(where: { text[$0].isLetter && ($0 == 0 || !(text[$0 - 1].isLetter || text[$0 - 1].isNumber || text[$0 - 1] == ")")) }) { continue }
             // An exponent that goes on unraised, as the "/" of "2^(n/2)" or the "−" of "2^(n−1)", is
             // only partly seen; the token is left as it is.
             if raised.contains(where: { index in
