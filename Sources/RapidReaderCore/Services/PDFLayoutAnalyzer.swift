@@ -224,6 +224,7 @@ enum PDFLayoutAnalyzer {
         gatherFigures(&blocks, lines: &lines, ink: pageInk)
         joinSideBySide(&blocks, lines: &lines)
         attachTableHeaders(&blocks, lines: &lines)
+        absorbEnclosedRows(&blocks, lines: &lines)
         // A wordless label lying partly over a drawing, such as a figure's own title, is part of it.
         for index in lines.indices where lines[index].block == nil && lines[index].kind == nil
             && !lines[index].text.split(whereSeparator: \.isWhitespace).contains(where: isWord) && lines[index].text.contains(where: \.isLetter) {
@@ -362,9 +363,22 @@ enum PDFLayoutAnalyzer {
                               CGRect(x: crop.maxX, y: grown.minY, width: max(0, grown.maxX - crop.maxX), height: grown.height)].filter { $0.width > 0.5 && $0.height > 0.5 }
                 if !others.contains(where: { other in strips.contains { $0.intersects(other) } }) { crop = grown }
             }
+            // A rule the crop took in at its edge, as the separator of the footnotes under a
+            // display, is no part of the formula; it is left out and the crop closes on the rest.
+            var erased: [CGRect] = []
+            if block.kind == .formula, let pageInk {
+                erased = pageInk.separatedRules(in: crop)
+                // What lies beyond the rule, as the top of a footnote's mark, is not the formula's either.
+                for rule in erased {
+                    let top = crop.maxY
+                    if rule.midY < crop.midY { crop.origin.y = max(crop.minY, rule.midY) } else { crop.size.height = min(crop.maxY, rule.midY) - crop.minY; continue }
+                    crop.size.height = top - crop.minY
+                }
+                if !erased.isEmpty, let rest = pageInk.inkBounds(in: crop, excluding: erased) { crop = rest.insetBy(dx: -2, dy: -2).intersection(crop) }
+            }
             let memberText = lines.filter { $0.block == index }.map(\.text).joined()
             let hollow = block.kind != .image && !memberText.contains(where: { $0.isLetter || $0.isNumber })
-            guard !hollow, let image = renderPNG(of: page, rect: crop, pageBounds: pageBounds),
+            guard !hollow, let image = renderPNG(of: page, rect: crop, pageBounds: pageBounds, erasing: erased),
                   hasInk(image, crop: block.kind == .image ? nil : crop) else {
                 for line in lines.indices where lines[line].block == index { lines[line].block = nil }
                 continue
@@ -1047,6 +1061,11 @@ enum PDFLayoutAnalyzer {
                   !isDictionaryWord(source.substring(with: tokens[run.lowerBound - 1])) {
                 run = (run.lowerBound - 1)..<run.upperBound
             }
+            // An operator written as a word, as the "mod" of "75 mod 17 = 7", joins its operands.
+            if run.lowerBound >= 2, source.substring(with: tokens[run.lowerBound - 1]) == "mod",
+               source.substring(with: tokens[run.lowerBound - 2]).range(of: #"^[(\[]?[\p{L}\p{N}]{1,3}[)\]]?$"#, options: .regularExpression) != nil {
+                run = (run.lowerBound - 2)..<run.upperBound
+            }
             let text = tokens[run].map { source.substring(with: $0) }
             // The reader only stops on longer expressions; short ones stay words. A picture is only
             // taken of real mathematics, not of "Positivity/Overlap", "(in Chapter 7)" or "Pearl(2009)".
@@ -1224,10 +1243,17 @@ enum PDFLayoutAnalyzer {
         let superscripts: [Character: Character] = ["/": "ᐟ", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
             "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ"]
         // The line's baseline is where most of its glyphs end; subscripts and old-style figures
-        // such as 7 and 9 reach below it, so the lowest glyph would mislead.
-        let lineBottoms = ink.glyphColumns(in: box).compactMap { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: box.minY, width: $0.upperBound - $0.lowerBound, height: box.height)) }
-        let tally = Dictionary(grouping: lineBottoms.map { ($0 * 2).rounded() / 2 }, by: { $0 }).mapValues(\.count)
-        guard var baseline = tally.max(by: { ($0.value, $0.key) < ($1.value, $1.key) })?.key, tally[baseline, default: 0] >= 3 else { return [:] }
+        // such as 7 and 9 reach below it, so the lowest glyph would mislead. A line full of indices,
+        // commas and braces, as "B = {x₁, x₂, ¬x₃}", can end more glyphs below its baseline than on
+        // it; a level a point or two higher that half as many glyphs end on is the baseline then.
+        func level(in box: CGRect) -> CGFloat? {
+            let bottoms = ink.glyphColumns(in: box).compactMap { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: box.minY, width: $0.upperBound - $0.lowerBound, height: box.height)) }
+            let tally = Dictionary(grouping: bottoms.map { ($0 * 2).rounded() / 2 }, by: { $0 }).mapValues(\.count)
+            guard let mode = tally.max(by: { ($0.value, $0.key) < ($1.value, $1.key) }), mode.value >= 3 else { return nil }
+            let higher = tally.filter { $0.key > mode.key + 0.75 && $0.key <= mode.key + 2.5 && $0.value >= max(3, (mode.value + 1) / 2) }
+            return higher.max(by: { ($0.value, $0.key) < ($1.value, $1.key) })?.key ?? mode.key
+        }
+        guard var baseline = level(in: box) else { return [:] }
         // Glyphs are measured between the lowest a descender reaches and the highest an exponent
         // does, at the size most of the line is set in; the lines above and below can reach into
         // the line's box.
@@ -1243,10 +1269,8 @@ enum PDFLayoutAnalyzer {
         if box.height > size * 1.6, let own = ink.rowBands(in: box).filter({ $0.lowerBound > box.minY + 0.5 && $0.upperBound < box.maxY - 0.5 }).max(by: { $0.upperBound - $0.lowerBound < $1.upperBound - $1.lowerBound }),
            own.upperBound - own.lowerBound > size * 0.5 {
             box = CGRect(x: box.minX, y: own.lowerBound - 1, width: box.width, height: own.upperBound - own.lowerBound + 2)
-            let bottoms = ink.glyphColumns(in: box).compactMap { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: box.minY, width: $0.upperBound - $0.lowerBound, height: box.height)) }
-            let tally = Dictionary(grouping: bottoms.map { ($0 * 2).rounded() / 2 }, by: { $0 }).mapValues(\.count)
-            guard let found = tally.max(by: { ($0.value, $0.key) < ($1.value, $1.key) }), found.value >= 3 else { return [:] }
-            baseline = found.key
+            guard let found = level(in: box) else { return [:] }
+            baseline = found
         }
         let low = max(box.minY, baseline - size * 0.3), high = min(box.maxY, baseline + size * 0.95)
         guard high - low > size * 0.6 else { return [:] }
@@ -1315,18 +1339,16 @@ enum PDFLayoutAnalyzer {
                 var glyphs = coarse, level = baseline
                 var measured: [(span: Range<CGFloat>, bottom: CGFloat, top: CGFloat)]?
                 if pass == 1 {
-                    // A line of mathematics is cropped whole, and so is mathematics with accents in a
-                    // sentence, as "(µ̂₀, π̂b)", so their text is left as it is.
-                    guard !looksLikeMath(line), !line.contains(where: { "ˆ¯˜˙".contains($0) }) else { break }
+                    // Mathematics with accents in a sentence, as "(µ̂₀, π̂b)", is cropped, so its text
+                    // is left as it is.
+                    guard !line.contains(where: { "ˆ¯˜˙".contains($0) }) else { break }
                     if fine == nil {
-                        fine = .some(FineInk(page: page, pageBounds: ink.bounds, rect: band.insetBy(dx: -2, dy: 0)).flatMap { map in
-                            // Round glyphs dip a little below it, so of two levels as common the higher is taken;
-                            // the baseline is then the middle of the glyphs that end about there.
-                            let bottoms = map.glyphs(in: band).map(\.bottom)
-                            let tally = Dictionary(grouping: bottoms.map { ($0 * 2).rounded() / 2 }, by: { $0 }).mapValues(\.count)
-                            guard let mode = tally.max(by: { ($0.value, $0.key) < ($1.value, $1.key) }), mode.value >= 3 else { return nil }
-                            let near = bottoms.filter { abs($0 - mode.key) <= 0.5 }.sorted()
-                            return (map, near[near.count / 2])
+                        // The strip runs the page's width: a token can sit beyond PDFKit's box for the line.
+                        fine = .some(FineInk(page: page, pageBounds: ink.bounds, rect: CGRect(x: ink.bounds.minX, y: band.minY, width: ink.bounds.width, height: band.height)).flatMap { map in
+                            // The baseline is the middle of the glyphs that end within a pixel of the one
+                            // measured at one pixel per point; dots and brackets end elsewhere.
+                            let near = map.glyphs(in: band).map(\.bottom).filter { abs($0 - baseline) <= 1 }.sorted()
+                            return near.count >= 2 ? (map, near[near.count / 2]) : nil
                         })
                     }
                     guard let (map, fineBaseline) = fine ?? nil else { break }
@@ -1334,6 +1356,19 @@ enum PDFLayoutAnalyzer {
                     glyphs = found.map(\.span)
                     measured = found
                     level = fineBaseline
+                    // A footnote's mark after a long word, as the "1" of "quickselect1,", is told by its
+                    // own glyphs, even where two of the word's letters touch.
+                    if found.count != text.count, let mark = String(text).firstMatch(of: /^\p{Ll}{4,}(\d{1,2})([.,;:)]?)$/) {
+                        let digits = mark.output.1.count, tail = mark.output.2.count
+                        let last = Array(found.suffix(digits + tail + 1))
+                        if last.count == digits + tail + 1, abs(last[0].bottom - level) <= 1,
+                           last[1...digits].allSatisfy({ $0.bottom >= level + size * 0.25 && $0.top > last[0].top - 1 }) {
+                            let word = String(text.dropLast(digits + tail)), figures = String(text.dropFirst(text.count - digits - tail).prefix(digits))
+                            result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + word + String(figures.compactMap { superscripts[$0] })
+                                + String(text.suffix(tail)) + String(line[token.upperBound..<whole.upperBound])
+                            break tokens
+                        }
+                    }
                 }
                 guard glyphs.count == text.count else { continue }
                 let bottoms: [CGFloat?] = measured?.map(\.bottom) ?? glyphs.map { ink.lowestInk(in: CGRect(x: $0.lowerBound, y: band.minY, width: $0.upperBound - $0.lowerBound, height: band.height)) }
@@ -1373,7 +1408,7 @@ enum PDFLayoutAnalyzer {
                     var lowered = text.indices.filter { index in
                         guard letter(index), !"jp".contains(text[index]), let bottom = bottoms[index], let top = tops[index], subscripts[text[index]] != nil else { return false }
                         // Drawn finer, a drop of a point is measured, not a pixel's rounding.
-                        return bottom <= level - (measured == nil ? max(1, seatedHeight * 0.2) : max(0.9, seatedHeight * 0.14)) && top < seatedTop - seatedHeight * 0.3 && height(index) <= seatedHeight * 0.86
+                        return bottom <= level - (measured == nil ? max(1, seatedHeight * 0.2) : max(0.9, seatedHeight * 0.14)) && top < seatedTop - seatedHeight * 0.3 && height(index) <= seatedHeight * (measured == nil ? 0.86 : 0.9)
                     }
                     // Letters with descenders reach down anyway; one goes on a subscript, as the "j" of
                     // "Gₙⱼ", when it stays as low as the letter before it.
@@ -1397,7 +1432,11 @@ enum PDFLayoutAnalyzer {
                     }) {
                         var written = text
                         for index in lowered { written[index] = subscripts[text[index]]! }
-                        result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
+                        let rewritten = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
+                        // A line of mathematics is cropped whole; drawn finer, its text is not rewritten
+                        // so far that it would read as prose.
+                        if measured != nil, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
+                        result[String(line[whole])] = rewritten
                         break tokens
                     }
                 }
@@ -1430,6 +1469,9 @@ enum PDFLayoutAnalyzer {
                 // Raised characters that open a token mark a footnote on the word they precede, as in
                 // "¹Cornell"; before a digit, as the "1" of "17M" would be, they are misread ink.
                 if raised.contains(text.startIndex), let first = text.indices.first(where: { !raised.contains($0) }), !text[first].isLetter { continue }
+                // Drawn finer, an exponent that opens with a sign, as the "−2" of "7.5e^(−2d̄(x,a))",
+                // goes on in the next piece of the row, where the line's crop shows it.
+                if measured != nil, let first = raised.min(), "−+-".contains(text[first]) { continue }
                 var lifted = raised
                 // A two-figure power of ten, as "10³⁸", is raised whole when its last figure is.
                 if let ten = String(text).range(of: #"10\d\d"#, options: .regularExpression) {
@@ -1438,7 +1480,9 @@ enum PDFLayoutAnalyzer {
                 }
                 var written = text
                 for index in lifted { written[index] = superscripts[text[index]]! }
-                result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
+                let rewritten = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
+                if measured != nil, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
+                result[String(line[whole])] = rewritten
                 break tokens
             }
           }
@@ -1969,7 +2013,12 @@ enum PDFLayoutAnalyzer {
         let text = text.replacingOccurrences(of: #"(?<=\p{Lu}\p{Ll}{1,30})[∗†‡§¶]+"#, with: "", options: .regularExpression)
         let tokens = text.split(whereSeparator: \.isWhitespace)
         guard !tokens.isEmpty, text.unicodeScalars.contains(where: isMathSymbol) else { return false }
-        return Double(tokens.filter(isWord).count) / Double(tokens.count) < 0.4
+        // Names of quantities, as "xk" in "xk mod m = 1", and operators such as "mod" are no words.
+        let words = tokens.filter { token in
+            let letters = wordLetters(token).lowercased()
+            return isWord(token) && !mathWords.contains(letters) && (letters.count >= 3 && isDictionaryWord(letters) || shortWords.contains(letters) || letters.count >= 8)
+        }
+        return Double(words.count) / Double(tokens.count) < 0.4
     }
 
     /// A row of array cells or table entries, such as `1 3 6 2 8 2 5 9` or `X X X X`.
@@ -2250,6 +2299,42 @@ enum PDFLayoutAnalyzer {
 
     /// A table drawn as rows of figures, as "John 10 15", takes the row of headings just over it,
     /// as "person arrival time leaving time".
+    /// A row of a display that PDFKit set apart from it, as the "gcd(b,a mod b)" case inside a
+    /// definition by cases, or the last of aligned equations just under the rest, as "xⁿ mod m =
+    /// (x mod m)ⁿ mod m", belongs to that display.
+    private static func absorbEnclosedRows(_ blocks: inout [Block], lines: inout [Line]) {
+        let height = typicalLineHeight(lines.map(\.bounds))
+        var changed = true
+        while changed {
+            changed = false
+            for index in lines.indices where lines[index].block == nil && !lines[index].small {
+                let bounds = lines[index].bounds
+                let tokens = lines[index].text.split(whereSeparator: \.isWhitespace)
+                // Prose has words; a row of mathematics only names and the words of a case, as "mod"
+                // or "n is even".
+                let cases: Set<String> = ["if", "is", "odd", "even", "otherwise", "and", "for", "all", "else"]
+                guard !tokens.isEmpty, tokens.first?.first?.isUppercase != true || tokens.count == 1, tokens.allSatisfy({ token in
+                    let letters = wordLetters(token).lowercased()
+                    return !isWord(token) || letters.count < 3 || mathWords.contains(letters) || cases.contains(letters) || !isDictionaryWord(letters)
+                }) else { continue }
+                for block in blocks.indices where blocks[block].kind == .formula && !blocks[block].rect.isNull {
+                    let rect = blocks[block].rect
+                    let inside = bounds.intersection(rect)
+                    let enclosed = !inside.isNull && inside.width * inside.height >= bounds.width * bounds.height * 0.8
+                    // A row under the display stays within its width, which prose set from the margin does not.
+                    let under = bounds.minY < rect.minY && bounds.maxY > rect.minY - height * 0.6
+                        && bounds.minX >= rect.minX - 12 && bounds.maxX <= rect.maxX + 12 && lines[index].text.contains("=")
+                    guard enclosed || under else { continue }
+                    lines[index].block = block
+                    lines[index].kind = .formula
+                    blocks[block].rect = rect.union(bounds)
+                    changed = true
+                    break
+                }
+            }
+        }
+    }
+
     private static func attachTableHeaders(_ blocks: inout [Block], lines: inout [Line]) {
         for index in blocks.indices where blocks[index].kind == .image && !blocks[index].rect.isNull {
             let members = lines.indices.filter { lines[$0].block == index }
@@ -3209,7 +3294,7 @@ enum PDFLayoutAnalyzer {
         return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 
-    private static func renderPNG(of page: PDFPage, rect: CGRect, pageBounds: CGRect) -> Data? {
+    private static func renderPNG(of page: PDFPage, rect: CGRect, pageBounds: CGRect, erasing: [CGRect] = []) -> Data? {
         let crop = rect.intersection(pageBounds)
         guard !crop.isNull, crop.width >= 4, crop.height >= 4 else { return nil }
         let scale = min(3, 2400 / max(crop.width, crop.height))
@@ -3223,6 +3308,8 @@ enum PDFLayoutAnalyzer {
         context.scaleBy(x: scale, y: scale)
         context.translateBy(x: pageBounds.minX - crop.minX, y: pageBounds.minY - crop.minY)
         page.draw(with: .cropBox, to: context)
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        for area in erasing { context.fill(area.offsetBy(dx: -pageBounds.minX, dy: -pageBounds.minY)) }
         guard let full = context.makeImage() else { return nil }
         let trimmed = trimmingEdgeSlivers(full, in: context, scale: scale) ?? full
         // A white margin keeps ink off the picture's edges, so a tight crop does not look cut.
@@ -3291,8 +3378,10 @@ private struct FineInk {
                         stack.append(ny * width + nx)
                     } }
                 }
-                // Specks of a pixel or two are antialiasing, not glyphs.
-                if (piece.maxX - piece.minX + 1) * (piece.maxRow - piece.minRow + 1) > 2 { pieces.append(piece) }
+                // Specks of a pixel or two are antialiasing, not glyphs, and a sliver at the area's
+                // side is the edge of a neighbour.
+                let sliver = piece.maxX - piece.minX < 2 && (piece.minX == left || piece.maxX == right)
+                if (piece.maxX - piece.minX + 1) * (piece.maxRow - piece.minRow + 1) > 2, !sliver { pieces.append(piece) }
             }
         }
         pieces.sort { $0.minX < $1.minX }
@@ -3396,6 +3485,51 @@ private struct InkMap {
             }
         }
         return runs
+    }
+
+    /// Thin rules near the top or bottom of `rect` with blank rows on both sides, as the separator
+    /// of the footnotes that a display's crop reaches.
+    func separatedRules(in rect: CGRect) -> [CGRect] {
+        let left = max(0, Int(rect.minX - bounds.minX)), right = min(width - 1, Int(rect.maxX - bounds.minX))
+        let top = max(0, Int(bounds.maxY - rect.maxY)), bottom = min(height - 1, Int(bounds.maxY - rect.minY))
+        guard left < right, top + 2 < bottom else { return [] }
+        func inked(_ row: Int, _ column: Int) -> Bool { row >= 0 && row < height && pixels[row * width + column] < 160 }
+        var rules: [CGRect] = []
+        for row in Array(top...min(bottom, top + 6)) + Array(max(top, bottom - 6)...bottom) {
+            var column = left
+            while column <= right {
+                guard inked(row, column) else { column += 1; continue }
+                let start = column
+                while column <= right, inked(row, column) { column += 1 }
+                guard column - start >= 30 else { continue }
+                // Its rows: the ones inked along most of the run, at most two.
+                let span = start..<column
+                func along(_ other: Int) -> Bool { span.filter { inked(other, $0) }.count * 10 >= span.count * 8 }
+                var first = row, last = row
+                while first - 1 >= top, along(first - 1) { first -= 1 }
+                while last + 1 <= bottom, along(last + 1) { last += 1 }
+                func blank(_ other: Int) -> Bool { span.filter { inked(other, $0) }.count * 10 <= span.count }
+                guard last - first <= 1, blank(first - 1), blank(last + 1) else { continue }
+                let rule = CGRect(x: bounds.minX + CGFloat(start) - 1, y: bounds.maxY - CGFloat(last + 1) - 1, width: CGFloat(column - start) + 2, height: CGFloat(last - first + 1) + 2)
+                if !rules.contains(where: { $0.intersects(rule) }) { rules.append(rule) }
+            }
+        }
+        return rules
+    }
+
+    /// The box of the ink in `rect` outside all of `excluded`.
+    func inkBounds(in rect: CGRect, excluding excluded: [CGRect]) -> CGRect? {
+        let left = max(0, Int(rect.minX - bounds.minX)), right = min(width - 1, Int(rect.maxX - bounds.minX))
+        let top = max(0, Int(bounds.maxY - rect.maxY)), bottom = min(height - 1, Int(bounds.maxY - rect.minY))
+        guard left <= right, top <= bottom else { return nil }
+        var result = CGRect.null
+        for row in top...bottom {
+            for column in left...right where pixels[row * width + column] < 160 {
+                let point = CGRect(x: bounds.minX + CGFloat(column), y: bounds.maxY - CGFloat(row + 1), width: 1, height: 1)
+                if !excluded.contains(where: { $0.contains(CGPoint(x: point.midX, y: point.midY)) }) { result = result.union(point) }
+            }
+        }
+        return result.isNull ? nil : result
     }
 
     /// `rect` without the rows near its top and bottom that are inked nearly all the way across,
