@@ -68,8 +68,9 @@ public enum PDFTextExtractor {
             func heading(_ line: String, of title: String) -> Bool {
                 let line = line.hasPrefix(PDFLayoutAnalyzer.smallPrint) ? String(line.dropFirst(PDFLayoutAnalyzer.smallPrint.count)) : line
                 guard !PDFLayoutAnalyzer.isMarker(line), line.count <= title.count + 16 else { return false }
-                let own = letters(line), wanted = letters(title)
-                return !wanted.isEmpty && (own == wanted || own == "chapter" + wanted || own == "part" + wanted)
+                // A part's title carries its numeral, as "II Graph algorithms" over "Graph algorithms".
+                let own = letters(line), wanted = letters(title), bare = letters(title.replacingOccurrences(of: #"^[IVXL]+\s+"#, with: "", options: .regularExpression))
+                return !wanted.isEmpty && (own == wanted || own == bare || own == "chapter" + wanted || own == "part" + wanted || own == "part" + bare)
                     || line.range(of: #"^(Chapter|Part)\s+([0-9]+|[IVXL]+)$"#, options: .regularExpression) != nil
             }
             sections = kept.enumerated().map { position, index in
@@ -380,6 +381,16 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"\b(Assumption|Figure|Table|Definition|Theorem|Section|Chapter|Equation|Proposition|Lemma|Corollary|Example|Listing)(\d)"#, with: "$1 $2", options: .regularExpression)
                 // A title after a number, as "Assumption 2.1(Ignorability", has its space back.
                 .replacingOccurrences(of: #"(\d)\((\p{Lu}\p{Ll}{2,})"#, with: "$1 ($2", options: .regularExpression)
+                // A slashed equals sign PDFKit wrote as a combining stroke, "x ̸= y", is "≠".
+                .replacingOccurrences(of: #"\s?\x{0338}\s?="#, with: " ≠", options: .regularExpression)
+                // A minus or an operator glued to a word, as "length−4", "is−2³¹", "the==" or "are¬",
+                // stands apart from it; "x−1" is mathematics and stays.
+                .replacingOccurrences(of: #"(?<![\p{L}\p{N}])([a-z]{3,})([−¬]|==|--)(?=\S)"#, with: "$1 $2", options: .regularExpression)
+                .replacingOccurrences(of: #"(?<![\p{L}\p{N}])([a-z]{3,})(==|--)(?=\s)"#, with: "$1 $2", options: .regularExpression)
+                .replacingOccurrences(of: #"(?<![\p{L}\p{N}])(of|is|to|in|at|by|as|or|be|on)−(?=\S)"#, with: "$1 −", options: .regularExpression)
+                .replacingOccurrences(of: #"(?<=[:,])¬"#, with: " ¬", options: .regularExpression)
+                // A function's name keeps its argument: "f (n)" is "f(n)".
+                .replacingOccurrences(of: #"(?<![\p{L}\p{N}])([fgh]) \("#, with: "$1(", options: .regularExpression)
                 // "O(logn)" and "O(mlogm)" read "O(log n)" and "O(m log m)".
                 .replacingOccurrences(of: #"(?<![\p{L}])([a-z])log([a-z])(?![\p{L}(])"#, with: "$1 log $2", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<![\p{L}])log([a-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
@@ -516,7 +527,7 @@ public enum PDFTextExtractor {
         var page = page
         for index in page.indices where page[index].hasPrefix(mark) {
             let line = String(page[index].dropFirst(mark.count))
-            guard let match = line.firstMatch(of: /^(\d{1,2}) ?(\p{Lu}[\p{L}’']*)/), String(match.output.2).count >= 2 || String(match.output.2) == "A" || String(match.output.2) == "I" else { continue }
+            guard let match = line.firstMatch(of: /^(\d{1,2}) ?(\p{Lu}[\p{L}’'.]*)/) else { continue }
             let number = String(match.output.1)
             numbers.insert(number)
             page[index] = mark + up(number) + " " + line.dropFirst(number.count).drop { $0 == " " }
