@@ -425,6 +425,11 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"\b(Assumption|Figure|Table|Definition|Theorem|Section|Chapter|Equation|Proposition|Lemma|Corollary|Example|Listing)(\d)"#, with: "$1 $2", options: .regularExpression)
                 // A title after a number, as "Assumption 2.1(Ignorability", has its space back.
                 .replacingOccurrences(of: #"(\d)\((\p{Lu}\p{Ll}{2,})"#, with: "$1 ($2", options: .regularExpression)
+                // An overbar PDFKit set apart, as in "complement¯ A" or "A ∩¯ B", goes on the name of
+                // one letter after it, "Ā"; with no letter after, as in "E¯ [", on the one before.
+                .replacingOccurrences(of: #"(?<=[\p{L}\p{N}∩∪])¯\s?(?!\#(PDFLayoutAnalyzer.markerPrefix))([\x{0370}-\x{03FF}]|\p{L}(?![\p{L}(]))"#, with: " $1\u{0304}", options: .regularExpression)
+                .replacingOccurrences(of: #"¯\s?(?!\#(PDFLayoutAnalyzer.markerPrefix))([\x{0370}-\x{03FF}]|\p{L}(?![\p{L}(]))"#, with: "$1\u{0304}", options: .regularExpression)
+                .replacingOccurrences(of: #"(?<!\p{L})(\p{Lu})¯(?=\s|$)"#, with: "$1\u{0304}", options: .regularExpression)
                 // A slashed equals sign PDFKit wrote as a combining stroke, "x ̸= y", is "≠".
                 .replacingOccurrences(of: #"\s?\x{0338}\s?="#, with: " ≠", options: .regularExpression)
                 // A minus or an operator glued to a word, as "length−4", "is−2³¹", "the==" or "are¬",
@@ -433,6 +438,9 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<![\p{L}\p{N}])([a-z]{3,})(==|--)(?=\s)"#, with: "$1 $2", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<![\p{L}\p{N}])(of|is|to|in|at|by|as|or|be|on)−(?=\S)"#, with: "$1 −", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<=[:,])¬"#, with: " ¬", options: .regularExpression)
+                // An operator PDFKit set against the term before it, as "AB= C", "k− a" or "10⊕ 12",
+                // stands apart from both sides as typeset.
+                .replacingOccurrences(of: #"(?<=[\p{L}\p{N})\]}′])([=≤≥≠<>⊕×+−≈≡])(?= )"#, with: " $1", options: .regularExpression)
                 // A function's name keeps its argument: "f (n)" is "f(n)".
                 .replacingOccurrences(of: #"(?<![\p{L}\p{N}])([fgh]) \("#, with: "$1(", options: .regularExpression)
                 // "O(logn)" and "O(mlogm)" read "O(log n)" and "O(m log m)".
@@ -619,10 +627,12 @@ public enum PDFTextExtractor {
             line.range(of: #"[.!?]["”’)]?$"#, options: .regularExpression) != nil
                 && line.range(of: #"(\b(e\.g|i\.e|cf|vs|etc|al|Eq|Fig|Sec)\.|\bet al\.)$"#, options: .regularExpression) == nil
         }
+        // Notes put before a heading stay there.
+        var settled: Set<String> = []
         for page in pages.indices {
             var index = 0
             while index < pages[page].count {
-                guard small(pages[page][index]), index == 0 || !small(pages[page][index - 1]) else { index += 1; continue }
+                guard small(pages[page][index]), index == 0 || !small(pages[page][index - 1]), !settled.contains(pages[page][index]) else { index += 1; continue }
                 let first = pages[page][index...].firstIndex { small($0) && !PDFLayoutAnalyzer.isMarker(String($0.dropFirst(mark.count))) } ?? index
                 let numbered = noteStart(pages[page][first])
                 var end = index + 1
@@ -644,7 +654,12 @@ public enum PDFTextExtractor {
                 var position = (page, end)
                 while target == nil, position.0 < pages.count, position.0 <= page + 1 {
                     let lines = pages[position.0]
-                    if let line = lines.indices.first(where: { $0 >= position.1 && body(lines[$0]) && endsSentence(lines[$0]) }) { target = (position.0, line) }
+                    // A heading on the way ends the search: the note stays before it, in its own section.
+                    let heading = PDFLayoutAnalyzer.headingPrint
+                    if let line = lines.indices.first(where: { $0 >= position.1 && (lines[$0].hasPrefix(heading) || body(lines[$0]) && endsSentence(lines[$0])) }) {
+                        target = !lines[line].hasPrefix(heading) ? (position.0, line) : line > 0 ? (position.0, line - 1) : (page, pages[page].count - 1)
+                        if lines[line].hasPrefix(heading) { settled.insert(pages[page][index]) }
+                    }
                     position = (position.0 + 1, 0)
                 }
                 guard let target else { index = end; continue }
