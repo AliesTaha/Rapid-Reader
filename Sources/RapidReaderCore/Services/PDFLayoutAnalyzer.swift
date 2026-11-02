@@ -1170,6 +1170,8 @@ enum PDFLayoutAnalyzer {
         let leading = (raw as NSString).range(of: #"^\s*"#, options: .regularExpression).length
         // A frame's rule just above or below the line would join every column into one.
         var box = ink.withoutRules(selection.bounds(for: page).insetBy(dx: 0, dy: -2))
+        let subscripts: [Character: Character] = ["0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+            "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ"]
         let superscripts: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
             "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ"]
         // The line's baseline is where most of its glyphs end; subscripts and old-style figures
@@ -1284,6 +1286,26 @@ enum PDFLayoutAnalyzer {
                 guard let bottom = bottoms[index] else { return false }
                 return letter(index) ? bottom >= baseline + max(1.5, seatedHeight * 0.3)
                     : "+−-=()".contains(text[index]) && bottom >= baseline + seatedHeight * 0.55
+            }
+            // A subscript, as the "1" of "a1" or the "i" of "xi", sits below the baseline and stays
+            // under the tops of its base; letters that reach down anyway, as "p", are left out.
+            if raised.isEmpty {
+                let lowered = text.indices.filter { index in
+                    guard letter(index), let bottom = bottoms[index], let top = tops[index], subscripts[text[index]] != nil else { return false }
+                    return bottom <= baseline - max(1, seatedHeight * 0.2) && top < seatedTop - seatedHeight * 0.3 && height(index) <= seatedHeight * 0.8
+                }
+                // A word, as "nim", has no subscript letters, whatever its last letter measures.
+                let word = String(text.filter(\.isLetter))
+                if !lowered.isEmpty, !(lowered.contains { text[$0].isLetter } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase))),
+                   lowered.allSatisfy({ index in
+                    index > 0 && (text[index - 1].isLetter || text[index - 1] == ")" || lowered.contains(index - 1) || text[index - 1].isNumber && lowered.contains(index - 1))
+                        && text[index - 1] != " " && !(lowered.contains(index - 1) == false && text[index - 1].isNumber)
+                }) {
+                    var written = text
+                    for index in lowered { written[index] = subscripts[text[index]]! }
+                    result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
+                    break
+                }
             }
             // It is set smaller and reaches above it, or, measured in whole points, as high when it
             // stands well clear of the baseline; a speck of ink from the line above is not a character.
