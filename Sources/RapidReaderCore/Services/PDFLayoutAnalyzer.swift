@@ -250,6 +250,20 @@ enum PDFLayoutAnalyzer {
                 }
             }
         }
+        // The sentence that leads into a listing, as "their second elements (second):", is read
+        // even when a word of code in it made it look like code: it ends in a colon, holds words
+        // and starts left of the listing.
+        for index in blocks.indices where blocks[index].kind == .code && !blocks[index].rect.isNull {
+            let members = lines.indices.filter { lines[$0].block == index }.sorted { lines[$0].bounds.maxY > lines[$1].bounds.maxY }
+            guard members.count >= 3, let top = members.first else { continue }
+            let rest = members.dropFirst().map { lines[$0].bounds.minX }.min() ?? 0
+            let words = lines[top].text.split(whereSeparator: \.isWhitespace).filter(isWord).count
+            if lines[top].text.hasSuffix(":"), words >= 2, lines[top].bounds.minX < rest - 8 {
+                lines[top].block = nil
+                lines[top].kind = nil
+                blocks[index].rect = members.dropFirst().reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+            }
+        }
         // A statement inside a listing's frame, such as "if (n < 2) return false;" that read as
         // mathematics, is part of the listing.
         for index in lines.indices where lines[index].block == nil {
