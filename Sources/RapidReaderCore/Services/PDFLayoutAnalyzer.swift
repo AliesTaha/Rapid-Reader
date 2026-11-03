@@ -1098,8 +1098,10 @@ enum PDFLayoutAnalyzer {
             let text = tokens[run].map { source.substring(with: $0) }
             // The reader only stops on longer expressions; short ones stay words. A picture is only
             // taken of real mathematics, not of "Positivity/Overlap", "(in Chapter 7)" or "Pearl(2009)".
+            // The name "C++" and a command's options, as "(-std=c++11)", are no mathematics.
+            let signs = text.joined(separator: " ").replacingOccurrences(of: #"(?i)c\+\+(\d+)?|(?<![\w])\(?-{1,2}[A-Za-z][\w=+.-]*\)?"#, with: "", options: .regularExpression)
             guard run.count > 1 || text.joined().count >= 10,
-                  text.joined().range(of: #"[=<>≤≥≠≈∼∈∉⊂⊆∪∩+−×·→←↔⇒⟹∑∏∫√∞⊥≜|^]|[\x{0391}-\x{03C9}]|[\x{1D400}-\x{1D7FF}]|[\x{2100}-\x{214F}]"#, options: .regularExpression) != nil
+                  signs.range(of: #"[=<>≤≥≠≈∼∈∉⊂⊆∪∩+−×·→←↔⇒⟹∑∏∫√∞⊥≜|^]|[\x{0391}-\x{03C9}]|[\x{1D400}-\x{1D7FF}]|[\x{2100}-\x{214F}]"#, options: .regularExpression) != nil
             else { continue }
             // An expression holds a word or two at most; a run with more, even glued on as in
             // "0]with … Similarly,", is a sentence and stays text.
