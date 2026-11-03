@@ -226,6 +226,7 @@ enum PDFLayoutAnalyzer {
         joinSideBySide(&blocks, lines: &lines)
         attachTableHeaders(&blocks, lines: &lines)
         absorbEnclosedRows(&blocks, lines: &lines)
+        settleFigureLabels(&blocks, lines: &lines)
         // A wordless label lying partly over a drawing, such as a figure's own title, is part of it.
         for index in lines.indices where lines[index].block == nil && lines[index].kind == nil
             && !lines[index].text.split(whereSeparator: \.isWhitespace).contains(where: isWord) && lines[index].text.contains(where: \.isLetter) {
@@ -2399,6 +2400,36 @@ enum PDFLayoutAnalyzer {
 
     /// A table drawn as rows of figures, as "John 10 15", takes the row of headings just over it,
     /// as "person arrival time leaving time".
+    /// A drawing's labels set in a row under or over it, as "illegal illegal illegal valid" under
+    /// four boards or "step 1 step 2 step 3" under three trees, are spread far wider than prose and
+    /// belong to it; a heading that the drawing's box reached, as "Method 2", does not.
+    private static func settleFigureLabels(_ blocks: inout [Block], lines: inout [Line]) {
+        let height = typicalLineHeight(lines.map(\.bounds))
+        let prose = lines.filter { $0.block == nil && $0.text.count >= 40 }.map { $0.bounds.width / CGFloat($0.text.count) }.sorted()
+        guard !prose.isEmpty else { return }
+        let pitch = prose[prose.count / 2]
+        for block in blocks.indices where blocks[block].kind == .image && !blocks[block].rect.isNull {
+            for index in lines.indices where lines[index].heading && (lines[index].block == block || lines[index].bounds.intersects(blocks[block].rect)) {
+                lines[index].block = nil
+                var rect = blocks[block].rect
+                let bounds = lines[index].bounds
+                if bounds.midY < rect.midY { let top = rect.maxY; rect.origin.y = bounds.maxY + 0.5; rect.size.height = top - rect.minY }
+                else { rect.size.height = bounds.minY - 0.5 - rect.minY }
+                if rect.height > 4 { blocks[block].rect = rect }
+            }
+            for index in lines.indices where lines[index].block == nil && !lines[index].heading && !lines[index].text.isEmpty {
+                let bounds = lines[index].bounds, rect = blocks[block].rect
+                let tokens = lines[index].text.split(whereSeparator: \.isWhitespace)
+                let gap = bounds.maxY < rect.midY ? rect.minY - bounds.maxY : bounds.minY - rect.maxY
+                guard (2...8).contains(tokens.count), gap >= -1, gap < height, bounds.minX >= rect.minX - 10, bounds.maxX <= rect.maxX + 10,
+                      bounds.width / CGFloat(lines[index].text.count) >= pitch * 1.6,
+                      lines[index].text.range(of: #"[.:;,?!]$"#, options: .regularExpression) == nil else { continue }
+                lines[index].block = block
+                blocks[block].rect = rect.union(bounds)
+            }
+        }
+    }
+
     /// A row of a display that PDFKit set apart from it, as the "gcd(b,a mod b)" case inside a
     /// definition by cases, or the last of aligned equations just under the rest, as "xⁿ mod m =
     /// (x mod m)ⁿ mod m", belongs to that display.
