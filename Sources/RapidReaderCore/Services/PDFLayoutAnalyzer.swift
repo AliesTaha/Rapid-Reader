@@ -528,6 +528,16 @@ enum PDFLayoutAnalyzer {
                               CGRect(x: grown.minX, y: grown.minY, width: max(0, crop.minX - grown.minX), height: grown.height),
                               CGRect(x: crop.maxX, y: grown.minY, width: max(0, grown.maxX - crop.maxX), height: grown.height)].filter { $0.width > 0.5 && $0.height > 0.5 }
                 if !others.contains(where: { other in strips.contains { $0.intersects(other) } }) { crop = grown }
+                // Ink running on just past an edge, as the last circle of a row of nodes, is taken to its end.
+                func free(_ strip: CGRect) -> Bool { pageInk.inked(strip) && !others.contains(where: { $0.intersects(strip) }) }
+                var steps = 0
+                while steps < 16, free(CGRect(x: crop.maxX, y: crop.minY + 1, width: 0.5, height: max(0, crop.height - 2))) { crop.size.width += 0.5; steps += 1 }
+                steps = 0
+                while steps < 16, free(CGRect(x: crop.minX - 0.5, y: crop.minY + 1, width: 0.5, height: max(0, crop.height - 2))) { crop.origin.x -= 0.5; crop.size.width += 0.5; steps += 1 }
+                steps = 0
+                while steps < 16, free(CGRect(x: crop.minX + 1, y: crop.minY - 0.5, width: max(0, crop.width - 2), height: 0.5)) { crop.origin.y -= 0.5; crop.size.height += 0.5; steps += 1 }
+                steps = 0
+                while steps < 16, free(CGRect(x: crop.minX + 1, y: crop.maxY, width: max(0, crop.width - 2), height: 0.5)) { crop.size.height += 0.5; steps += 1 }
             }
             // A rule the crop took in at its edge, as the separator of the footnotes under a
             // display, is no part of the formula; it is left out and the crop closes on the rest.
