@@ -2343,6 +2343,25 @@ enum PDFLayoutAnalyzer {
                 break
             }
         }
+        // A fraction of words set as a display, as "number of desired outcomes" over "total number of
+        // outcomes", reads "(number of desired outcomes)/(total number of outcomes)".
+        for index in found.indices.dropLast() where !removed.contains(index) && !removed.contains(index + 1) {
+            let top = found[index].selection.bounds(for: page), bottom = found[index + 1].selection.bounds(for: page)
+            let words = [found[index].text, found[index + 1].text].map { $0.split(whereSeparator: \.isWhitespace).filter(isWord).count }
+            guard words.allSatisfy({ $0 >= 2 }), abs(top.midX - bottom.midX) < 10, bottom.midY < top.minY, top.minY - bottom.maxY < top.height * 1.2 else { continue }
+            let span = top.union(bottom)
+            let middle = CGRect(x: span.minX, y: bottom.midY, width: span.width, height: max(0, top.midY - bottom.midY))
+            // The bar is about as wide as its words; a chart's axis under a title runs much further.
+            let reach = CGRect(x: span.minX - span.width, y: middle.minY, width: span.width * 3, height: middle.height)
+            let runs = ink.glyphColumns(in: reach)
+            let bar = ink.rowBands(in: middle).contains { $0.upperBound - $0.lowerBound <= 1.5 }
+                && runs.contains { $0.upperBound - $0.lowerBound >= max(top.width, bottom.width) * 0.8 && $0.upperBound - $0.lowerBound <= max(top.width, bottom.width) * 1.3 }
+            guard bar else { continue }
+            let lower = found[index + 1].text.trimmingCharacters(in: .whitespaces)
+            let stop = String(lower.reversed().prefix { ".,;:".contains($0) }.reversed())
+            found[index].text = "(" + found[index].text.trimmingCharacters(in: .whitespaces) + ")/(" + String(lower.dropLast(stop.count)) + ")" + stop
+            removed.append(index + 1)
+        }
         for index in removed.sorted(by: >) {
             found.remove(at: index)
             respacedTokens.remove(at: index)
