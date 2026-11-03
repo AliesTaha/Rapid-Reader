@@ -772,6 +772,8 @@ enum PDFLayoutAnalyzer {
                 rect = CGRect(x: rect.minX, y: bottom, width: rect.width, height: top - bottom)
                 // A crop never ends inside a glyph.
                 if let ink = inlineInk { rect = ink.completingGlyphs(rect, left: expression.previousEnd, right: expression.nextStart) }
+                // Signs alone, as the "∪ ⋯ ∪" of "X₁ ∪ X₂ ∪ ⋯ ∪ Xₙ", read as they are.
+                if !(chain?.text ?? String(lines[index].text[expression.range])).contains(where: { $0.isLetter || $0.isNumber }) { continue }
                 inlines.append(Inline(line: index, range: expression.range, rect: rect, text: chain?.text ?? String(lines[index].text[expression.range]),
                                       atStart: expression.atStart, atEnd: expression.atEnd, pieces: chain?.pieces ?? [], claim: chain?.claim))
             }
@@ -1805,15 +1807,18 @@ enum PDFLayoutAnalyzer {
             return rect.width > 0 ? rect : nil
         }
         func operand(_ token: Substring) -> Bool {
-            token.range(of: #"^[\p{L}\p{N}+−-]{1,6}$"#, options: .regularExpression) != nil && !(token.count >= 2 && token.allSatisfy(\.isLetter) && isDictionaryWord(token.lowercased()))
+            // Plain names and figures; Greek and accented mathematics is cropped with its sentence.
+            token.range(of: #"^[A-Za-z0-9+−-]{1,6}$"#, options: .regularExpression) != nil && !(token.count >= 2 && token.allSatisfy(\.isLetter) && isDictionaryWord(token.lowercased()))
         }
         var removed: [Int] = []
         for index in found.indices {
+            func worded(_ index: Int) -> Bool { found[index].text.split(whereSeparator: \.isWhitespace).contains(where: { $0.count >= 3 && isDictionaryWord(wordLetters($0).lowercased()) }) }
             guard let last = found[index].text.ranges(of: /\S+/).last, operand(found[index].text[last]),
-                  found[index].text.split(whereSeparator: \.isWhitespace).contains(where: { $0.count >= 3 && isDictionaryWord(wordLetters($0).lowercased()) }),
                   let top = box(of: last, in: index) else { continue }
             for other in found.indices where other != index && !removed.contains(other) {
-                guard let first = found[other].text.ranges(of: /\S+/).first, operand(found[other].text[first]), let bottom = box(of: first, in: other) else { continue }
+                // The sentence runs through one of the two pieces at least.
+                guard worded(index) || worded(other), let first = found[other].text.ranges(of: /\S+/).first, operand(found[other].text[first]),
+                      let bottom = box(of: first, in: other) else { continue }
                 // Set under the top, on the same row of the page.
                 let overlap = min(top.maxX, bottom.maxX) - max(top.minX, bottom.minX)
                 guard overlap >= min(top.width, bottom.width) * 0.5, bottom.midY < top.midY - 2, top.midY - bottom.midY < top.height * 0.8 else { continue }
@@ -1821,9 +1826,10 @@ enum PDFLayoutAnalyzer {
                 // A bracket as tall as both, just before them, or a rule between them.
                 let bracket = ink.glyphColumns(in: CGRect(x: span.minX - 6, y: span.minY, width: 6, height: span.height)).contains { run in
                     let column = CGRect(x: run.lowerBound, y: span.minY, width: run.upperBound - run.lowerBound, height: span.height)
-                    guard run.lowerBound < span.minX, run.upperBound <= span.minX + 1.5, run.upperBound - run.lowerBound <= 4,
+                    guard run.lowerBound < span.minX, run.upperBound <= span.minX + 1.5, run.upperBound - run.lowerBound <= 5.5,
                           let high = ink.highestInk(in: column), let low = ink.lowestInk(in: column) else { return false }
-                    return high - low >= span.height * 0.65
+                    // PDFKit's boxes run taller than the ink, so the bracket need only reach half their span.
+                    return high - low >= span.height * 0.5
                 }
                 let middle = CGRect(x: span.minX, y: bottom.midY, width: span.width, height: max(0, top.midY - bottom.midY))
                 let bar = ink.rowBands(in: middle).contains { $0.upperBound - $0.lowerBound <= 1.5 } && ink.glyphColumns(in: middle).contains { $0.upperBound - $0.lowerBound >= span.width * 0.7 }
