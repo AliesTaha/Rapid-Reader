@@ -460,6 +460,15 @@ public enum PDFTextExtractor {
         movingNotes(&kept)
         keepingNotesInSection(&kept)
         droppingNoteMarks(&kept)
+        // A list's last item that ends a page ends with a stop where the next page opens a sentence.
+        for page in kept.indices.dropLast() {
+            let small = PDFLayoutAnalyzer.smallPrint
+            guard let last = kept[page].lastIndex(where: { !PDFLayoutAnalyzer.isMarker($0) && !$0.hasPrefix(small) }),
+                  kept[page][last].range(of: #"^(\(\d{1,2}\)|•)\s.*[\p{L}\p{N})\]]$"#, options: .regularExpression) != nil,
+                  let next = kept[page + 1].first(where: { !PDFLayoutAnalyzer.isMarker($0) && !$0.hasPrefix(small) }),
+                  next.first?.isUppercase == true || next.hasPrefix(PDFLayoutAnalyzer.headingPrint) else { continue }
+            kept[page][last] += "."
+        }
         // A note never parts a lead-in, as "… z[8] = 0:", from the picture it leads into.
         for page in kept.indices {
             var index = 1
