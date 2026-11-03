@@ -1273,7 +1273,10 @@ enum PDFLayoutAnalyzer {
         // A frame's rule just above or below the line would join every column into one.
         var box = ink.withoutRules(selection.bounds(for: page).insetBy(dx: 0, dy: -2))
         let subscripts: [Character: Character] = ["0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
-            "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ", "q": "\u{E002}", "−": "₋", "+": "₊"]
+            "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ", "−": "₋", "+": "₊"]
+            // Letters Unicode has no small form of, as the "q" of "sum_q" or the "A" of "S_A", are
+            // written as an index after an underscore.
+            .merging(Dictionary(uniqueKeysWithValues: "bcdfgqwyzABCDEFGHIJKLMNOPQRSTUVWXYZ".map { ($0, Character(UnicodeScalar(0xE100 + Int($0.asciiValue!))!)) })) { first, _ in first }
         let superscripts: [Character: Character] = ["/": "ᐟ", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
             "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ",
             "A": "ᴬ", "B": "ᴮ", "D": "ᴰ", "E": "ᴱ", "G": "ᴳ", "H": "ᴴ", "I": "ᴵ", "J": "ᴶ", "K": "ᴷ", "L": "ᴸ", "M": "ᴹ", "N": "ᴺ", "O": "ᴼ", "P": "ᴾ", "R": "ᴿ", "T": "ᵀ", "U": "ᵁ", "V": "ⱽ", "W": "ᵂ"]
@@ -1441,7 +1444,9 @@ enum PDFLayoutAnalyzer {
                 // under the tops of its base; letters that reach down anyway, as "p", are left out.
                 if raised.isEmpty {
                     var lowered = text.indices.filter { index in
-                        guard letter(index), !"jpq".contains(text[index]), let bottom = bottoms[index], let top = tops[index], subscripts[text[index]] != nil else { return false }
+                        guard letter(index), !"gjpqy".contains(text[index]), let bottom = bottoms[index], let top = tops[index], subscripts[text[index]] != nil else { return false }
+                        // A capital index, as the "A" of "S_A", is set much smaller than its base.
+                        if text[index].isUppercase, height(index) > seatedHeight * 0.8 || height(index) < seatedHeight * 0.5 { return false }
                         // Drawn finer, a drop of a point is measured, not a pixel's rounding.
                         return bottom <= level - (measured == nil ? max(1, seatedHeight * 0.2) : max(0.9, seatedHeight * 0.14)) && top < seatedTop - seatedHeight * 0.3 && height(index) <= seatedHeight * (measured == nil ? 0.86 : 0.9)
                     }
@@ -1473,8 +1478,11 @@ enum PDFLayoutAnalyzer {
                     }) {
                         var written = text
                         for index in lowered { written[index] = subscripts[text[index]]! }
-                        // Unicode has no small "q"; it is written as an index, "sum_q".
-                        let rewritten = String(line[whole.lowerBound..<token.lowerBound]) + String(written).replacingOccurrences(of: "\u{E002}", with: "_q") + String(line[token.upperBound..<whole.upperBound])
+                        let indexed = String(String(written).flatMap { character -> String in
+                            guard let scalar = character.unicodeScalars.first, (0xE100...0xE17F).contains(scalar.value) else { return String(character) }
+                            return "_" + String(UnicodeScalar(scalar.value - 0xE100)!)
+                        })
+                        let rewritten = String(line[whole.lowerBound..<token.lowerBound]) + indexed + String(line[token.upperBound..<whole.upperBound])
                         // A line of mathematics is cropped whole; drawn finer, its text is not rewritten
                         // so far that it would read as prose.
                         if measured != nil, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
