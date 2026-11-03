@@ -529,7 +529,7 @@ enum PDFLayoutAnalyzer {
                               CGRect(x: crop.maxX, y: grown.minY, width: max(0, grown.maxX - crop.maxX), height: grown.height)].filter { $0.width > 0.5 && $0.height > 0.5 }
                 if !others.contains(where: { other in strips.contains { $0.intersects(other) } }) { crop = grown }
                 // Ink running on just past an edge, as the last circle of a row of nodes, is taken to its end.
-                func free(_ strip: CGRect) -> Bool { pageInk.inked(strip) && !others.contains(where: { $0.intersects(strip) }) }
+                func free(_ strip: CGRect) -> Bool { strip.width > 0 && strip.height > 0 && pageInk.inkBounds(in: strip, excluding: others) != nil }
                 var steps = 0
                 while steps < 16, free(CGRect(x: crop.maxX, y: crop.minY + 1, width: 0.5, height: max(0, crop.height - 2))) { crop.size.width += 0.5; steps += 1 }
                 steps = 0
