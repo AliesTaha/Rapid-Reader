@@ -1593,8 +1593,10 @@ enum PDFLayoutAnalyzer {
             let steps = Array(stride(from: after.minX - 1.5, through: after.minX + share - 1, by: 0.5))
             guard steps.filter({ ink.inked(CGRect(x: $0, y: left - 1.5, width: 0.5, height: 2)) }).count * 10 >= steps.count * 9,
                   steps.filter({ ink.inked(CGRect(x: $0, y: left + 1.8, width: 0.5, height: 1)) }).count * 10 <= steps.count * 4,
-                  // and starts at the sign, unlike a table's rule over a row of figures.
-                  !ink.inked(CGRect(x: after.minX - size * 1.3, y: left - 0.7, width: size * 0.25, height: 1.2)) else { continue }
+                  // and starts at the sign, unlike a table's rule over a row of figures; a tall letter
+                  // of the word before, as the "f" of "of", is no rule.
+                  Array(stride(from: after.minX - size * 1.3, through: after.minX - size * 1.05, by: 0.5))
+                    .filter({ ink.inked(CGRect(x: $0, y: left - 0.7, width: 0.5, height: 1.2)) }).count * 10 < 7 * Int((size * 0.25 / 0.5).rounded(.down) + 1) else { continue }
             // The sign itself stands just before the radicand, from below the line up to the rule.
             let root = CGRect(x: after.minX - size * 0.9, y: baseline - size * 0.4, width: size * 0.9, height: left - baseline + size * 0.4 + 0.5)
             guard let low = ink.lowestInk(in: root), low <= baseline - size * 0.08,
