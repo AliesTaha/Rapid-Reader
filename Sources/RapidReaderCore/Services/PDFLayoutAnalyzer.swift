@@ -229,6 +229,15 @@ enum PDFLayoutAnalyzer {
         attachTableHeaders(&blocks, lines: &lines)
         absorbEnclosedRows(&blocks, lines: &lines)
         settleFigureLabels(&blocks, lines: &lines)
+        // A word of the sentence that a formula follows, as the "is" before "|(2·5 − 5·4) + …|", is read.
+        for index in lines.indices where lines[index].block.map({ blocks[$0].kind == .formula }) == true
+            && lines[index].text.range(of: #"^(is|are|where|and|or|then|so|as|gives|equals)$"#, options: .regularExpression) != nil {
+            let block = lines[index].block!
+            lines[index].block = nil
+            lines[index].kind = nil
+            let rest = lines.filter { $0.block == block }.reduce(CGRect.null) { $0.union($1.bounds) }
+            if !rest.isNull { blocks[block].rect = rest }
+        }
         mergeFormulaColumns(&blocks, lines: &lines)
         gatherOperatorTables(&blocks, lines: &lines)
         // A wordless label lying partly over a drawing, such as a figure's own title, is part of it.
@@ -299,8 +308,10 @@ enum PDFLayoutAnalyzer {
             }
         }
         for (index, block) in blocks.enumerated() where !block.rect.isNull {
+            // A drawing's labels, as the "(2,4)" beside a polygon's corner, are in its picture.
+            let labelled = block.kind == .image ? lines.filter { $0.block == index }.reduce(block.rect) { $0.union($1.bounds) } : block.rect
             // Padding stops short of neighbouring text so no half lines show at the edges.
-            var crop = block.rect.insetBy(dx: -6, dy: -6)
+            var crop = labelled.insetBy(dx: -6, dy: -6)
             for line in lines where line.block != index {
                 var bounds = fullHeight(line.bounds, lineHeight: lineHeight)
                 // A prose line holding inline math can report a box that reaches into the figure;
@@ -933,7 +944,8 @@ enum PDFLayoutAnalyzer {
         for index in 0...lines.count {
             // A figure in the side column, as a margin figure over its small caption, is marked
             // small like its caption and notes.
-            output += (markersBefore[index] ?? []).map { number in
+            // Pictures before one line come in the page's order, top first.
+            output += (markersBefore[index] ?? []).sorted { (figureRects[$0]?.maxY ?? 0) > (figureRects[$1]?.maxY ?? 0) }.map { number in
                 let side = figureRects[number].map { rect in bodyRight.map { rect.minX >= $0 - 4 } ?? false } ?? false
                 return (side ? smallPrint : "") + "\(markerPrefix)\(number)"
             }
