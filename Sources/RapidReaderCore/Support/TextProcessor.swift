@@ -202,7 +202,8 @@ public enum TextProcessor {
     /// standing alone are not. A lone "+", "≤" or "∅" carries meaning.
     /// A string of brackets, as the parenthesis expression "())()(", is read too.
     private static func containsReadableScalar(_ token: String) -> Bool {
-        if token.count >= 2, token.allSatisfy({ "()[]{}".contains($0) }) { return true }
+        // Strings of brackets, as "()()" or "())," with a stop after, are read.
+        if token.count >= 2, token.allSatisfy({ "()[]{}".contains($0) }) || token.range(of: #"^[()\[\]{}]{2,}[.,;:]$"#, options: .regularExpression) != nil { return true }
         // An operator of two signs, as "--" or "++", is read too.
         if token.count >= 2, token.allSatisfy({ "+-=<>!&|".contains($0) }) { return true }
         return token.unicodeScalars.contains { scalar in

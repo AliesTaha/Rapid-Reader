@@ -459,7 +459,7 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(\d)\((\p{Lu}\p{Ll}{2,})"#, with: "$1 ($2", options: .regularExpression)
                 // Items of a list run on into each other once their bullets are not read, as "…to any
                 // leaf maxLength(x): …"; an item without its own stop ends at the next bullet.
-                .replacingOccurrences(of: #"(?<!\#(PDFLayoutAnalyzer.markerPrefix)\d{1,5})(?<!\band|\bor)(?<=[\p{L}\p{N}’”⁰¹²³⁴⁵⁶⁷⁸⁹]|[\p{L}\p{N}][)\]}])\n(?=•\s)"#, with: ";\n", options: .regularExpression)
+                .replacingOccurrences(of: #"(?m)(?<!\#(PDFLayoutAnalyzer.markerPrefix)\d{1,5})(?<!\band|\bor)(?<=[\p{L}\p{N}’”⁰¹²³⁴⁵⁶⁷⁸⁹]|[\p{L}\p{N}][)\]}]|^•\s[()\[\]{}]{2,16})\n(?=•\s)"#, with: ";\n", options: .regularExpression)
                 // An overbar PDFKit set apart, as in "complement¯ A" or "A ∩¯ B", goes on the name of
                 // one letter after it, "Ā"; with no letter after, as in "E¯ [", on the one before.
                 .replacingOccurrences(of: #"(?<=[\p{L}\p{N}∩∪])¯\s?(?!\#(PDFLayoutAnalyzer.markerPrefix))([\x{0370}-\x{03FF}]|\p{L}(?![\p{L}(]))"#, with: " $1\u{0304}", options: .regularExpression)
