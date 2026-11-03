@@ -266,6 +266,22 @@ enum PDFLayoutAnalyzer {
             if !rest.isNull { blocks[block].rect = rest }
         }
         releaseLeadIns(&blocks, lines: &lines)
+        // A display set over a listing, as "123456789² mod 2³² = 2537071545." over the code that prints
+        // it, is a picture of its own.
+        for block in blocks.indices where blocks[block].kind == .code && !blocks[block].rect.isNull {
+            let members = lines.indices.filter { lines[$0].block == block }.sorted { lines[$0].bounds.midY > lines[$1].bounds.midY }
+            // Its lines hold no statement: no ";", brace or string.
+            let program = #"[;{}"]|\b(int|long|unsigned|void|while|return|cout|cin|vector|typedef|struct|auto|bool|char|double|for|if|else)\b|<<|>>|\+\+|//"#
+            let leading = Array(members.prefix { (lines[$0].kind == .formula || lines[$0].text.range(of: #"\s=\s|\bmod\b"#, options: .regularExpression) != nil)
+                && lines[$0].text.range(of: program, options: .regularExpression) == nil })
+            guard !leading.isEmpty, leading.count < members.count, let last = leading.last else { continue }
+            let next = members[leading.count]
+            guard lines[last].bounds.minY - lines[next].bounds.maxY >= 3 else { continue }
+            blocks.append(Block(kind: .formula, rect: leading.reduce(CGRect.null) { $0.union(lines[$1].bounds) }, firstLine: leading.min()))
+            for member in leading { lines[member].block = blocks.count - 1 }
+            blocks[block].rect = members.dropFirst(leading.count).reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+            if blocks[block].firstLine != nil { blocks[block].firstLine = members.dropFirst(leading.count).min() }
+        }
         // Captions under a picture, as "Euclidean distance   Manhattan distance" under two drawings, are
         // the picture's: a few plain words just under it, narrower than the text column, with no stop.
         let column = lines.filter { $0.block == nil && $0.text.count >= 40 }.map(\.bounds.width).sorted()
