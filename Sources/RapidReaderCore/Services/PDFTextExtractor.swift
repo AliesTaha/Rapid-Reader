@@ -865,7 +865,10 @@ public enum PDFTextExtractor {
                 var reference: (page: Int, line: Int)?
                 for candidate in [page, page - 1] where candidate >= 0 {
                     let upper = candidate == page ? index : pages[candidate].count
-                    if let found = (0..<upper).last(where: { !pages[candidate][$0].hasPrefix(small) && pages[candidate][$0].contains(mark) }) { reference = (candidate, found); break }
+                    // A power, as the "2¹" of "ϕ(12) = 2¹ · 3⁰", is no mark; nor is a line holding nothing else like one.
+                    let power = "(?<=\\d)" + String(mark) + "(?![⁰¹²³⁴⁵⁶⁷⁸⁹])", word = "(?<=\\p{L}[.,:;)]{0,1})" + String(mark)
+                    if let found = (0..<upper).last(where: { !pages[candidate][$0].hasPrefix(small) && pages[candidate][$0].contains(mark)
+                        && (pages[candidate][$0].range(of: power, options: .regularExpression) == nil || pages[candidate][$0].range(of: word, options: .regularExpression) != nil) }) { reference = (candidate, found); break }
                 }
                 guard let reference else { index = end; continue }
                 // The first heading after the mark and before the note.
