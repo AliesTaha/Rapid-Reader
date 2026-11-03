@@ -165,6 +165,7 @@ enum PDFLayoutAnalyzer {
             }
         }
         confirmDisplayFormulas(in: &lines)
+        confirmCentredDisplays(in: &lines)
         // A page set entirely in a typewriter font is prose, not a listing.
         if lines.filter({ $0.kind == .code }).count * 10 > lines.count * 6 {
             for index in lines.indices where lines[index].kind == .code { lines[index].kind = nil }
@@ -2170,6 +2171,45 @@ enum PDFLayoutAnalyzer {
         "gcd", "lcm", "det", "deg", "dim", "rank", "ker", "floor", "ceil", "sum", "prod", "var", "cov",
         "inv", "gen", "ctx", "val", "mock", "tr", "reg", "kl", "diag", "softmax", "tanh"
     ]
+
+    /// A display set as pieces, as "C[j,i]" over "A⁻¹[i,j] =" and "det(A).", is short lines
+    /// centred between the margins, close together, without words, one of them with a sign of
+    /// mathematics; PDFKit can leave all of them as text.
+    private static func confirmCentredDisplays(in lines: inout [Line]) {
+        let prose = lines.filter { $0.kind == nil && $0.text.count >= 40 }.map(\.bounds)
+        guard prose.count >= 3 else { return }
+        let left = prose.map(\.minX).sorted()[prose.count / 2], right = prose.map(\.maxX).sorted()[prose.count / 2]
+        let height = typicalLineHeight(lines.map(\.bounds))
+        func piece(_ line: Line) -> Bool {
+            let tokens = line.text.split(whereSeparator: \.isWhitespace)
+            return line.kind == nil && !line.small && !line.heading && !tokens.isEmpty && tokens.count <= 6
+                && line.bounds.minX > left + 40 && line.bounds.maxX < right - 40
+                && !tokens.contains { token in
+                    let letters = wordLetters(token).lowercased()
+                    return letters.count >= 3 && !mathWords.contains(letters) && isDictionaryWord(letters)
+                }
+        }
+        let candidates = lines.indices.filter { piece(lines[$0]) }
+        var seen: Set<Int> = []
+        for start in candidates where !seen.contains(start) {
+            // The cluster: pieces whose boxes come within half a line of one another.
+            var cluster = [start], frontier = [start]
+            while let current = frontier.popLast() {
+                for other in candidates where !cluster.contains(other) {
+                    let a = lines[current].bounds.insetBy(dx: -6, dy: -height * 0.5), b = lines[other].bounds
+                    if a.intersects(b) { cluster.append(other); frontier.append(other) }
+                }
+            }
+            seen.formUnion(cluster)
+            // An operator, not a footnote's mark as the "∗" after an author's name.
+            guard cluster.count >= 2, cluster.contains(where: { lines[$0].text.range(of: #"[=≤≥≠≈<>+−×÷/∑∏∫√∈∪∩]"#, options: .regularExpression) != nil }),
+                  !cluster.contains(where: { lines[$0].text.contains("@") }) else { continue }
+            // Nothing else stands beside it on its rows: a display is set off from the text.
+            let span = cluster.reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+            guard !lines.indices.contains(where: { !cluster.contains($0) && !lines[$0].text.isEmpty && lines[$0].bounds.intersects(span.insetBy(dx: -4, dy: 1)) }) else { continue }
+            for index in cluster { lines[index].kind = .formula }
+        }
+    }
 
     private static func confirmDisplayFormulas(in lines: inout [Line]) {
         func sameRow(_ a: CGRect, _ b: CGRect) -> Bool {
