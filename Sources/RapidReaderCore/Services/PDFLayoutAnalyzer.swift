@@ -672,8 +672,12 @@ enum PDFLayoutAnalyzer {
                     let before = run.first.map { $0 > 0 ? tokens[$0 - 1].rect.maxX : nil } ?? nil
                     let after = run.last.map { $0 + 1 < tokens.count ? tokens[$0 + 1].rect.minX : nil } ?? nil
                     rect = ink.grownVertically(rect, limit: lineHeight * 0.3)
-                    let ceiling = others.filter { $0.midY > band.midY }.map { boundary($0, above: true, centre: rect.midY) }.min() ?? rect.maxY
-                    let floor = others.filter { $0.midY < band.midY }.map { boundary($0, above: false, centre: rect.midY) }.max() ?? rect.minY
+                    var ceiling = others.filter { $0.midY > band.midY }.map { boundary($0, above: true, centre: rect.midY) }.min() ?? rect.maxY
+                    var floor = others.filter { $0.midY < band.midY }.map { boundary($0, above: false, centre: rect.midY) }.max() ?? rect.minY
+                    // An exponent reaching past halfway to the line above, as the "6" of "84⁶", is kept
+                    // where blank space parts it from that line.
+                    if rect.maxY > ceiling, rect.maxY - ceiling < usualHeight * 0.4, ink.blankRow(above: true, of: rect) { ceiling = rect.maxY }
+                    if rect.minY < floor, floor - rect.minY < usualHeight * 0.4, ink.blankRow(above: false, of: rect) { floor = rect.minY }
                     rect = CGRect(x: rect.minX, y: max(rect.minY, floor), width: rect.width, height: min(rect.maxY, ceiling) - max(rect.minY, floor))
                     guard rect.height >= 4 else { complete = false; break }
                     rect = ink.completingGlyphs(rect, left: before.map { $0 + 0.5 }, right: after.map { $0 - 0.5 })
@@ -844,9 +848,11 @@ enum PDFLayoutAnalyzer {
                             guard other != index, !(chain?.pieces.contains(other) ?? false), lines[other].bounds.intersects(slice),
                                   found[other].selection.numberOfTextRanges(on: page) == 1 else { return false }
                             let range = found[other].selection.range(at: 0, on: page)
+                            // A letter's box runs below its ink; only ink in the slice is a letter's.
                             return (range.location..<NSMaxRange(range)).contains { character in
                                 let glyph = page.characterBounds(at: character)
-                                return glyph.width > 0 && glyph.intersection(slice).height > 0.5
+                                let shared = glyph.intersection(slice)
+                                return glyph.width > 0 && shared.height > 0.5 && (shared.width < 1 || shared.height < 1 || ink.inked(shared.insetBy(dx: 0.3, dy: 0.3)))
                             }
                         }
                     }
@@ -902,10 +908,39 @@ enum PDFLayoutAnalyzer {
                     && (range.upperBound == line.endIndex || !line[range.upperBound].isLetter)
                 if chain == nil, apart, rect.height <= usualHeight * 1.35, isPlainMath(String(line[range])),
                    let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
+                // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first
+                // blank row, a little way at most.
+                if let ink = inlineInk {
+                    var grown = rect
+                    while !ink.blankRow(above: true, of: grown), grown.maxY - rect.maxY < usualHeight * 0.4 { grown.size.height += 0.5 }
+                    if ink.blankRow(above: true, of: grown) { rect = grown }
+                    grown = rect
+                    while !ink.blankRow(above: false, of: grown), rect.minY - grown.minY < usualHeight * 0.4 { grown.origin.y -= 0.5; grown.size.height += 0.5 }
+                    if ink.blankRow(above: false, of: grown) { rect = grown }
+                }
                 inlines.append(Inline(line: index, range: expression.range, rect: rect, text: chain?.text ?? String(lines[index].text[expression.range]),
                                       atStart: expression.atStart, atEnd: expression.atEnd, pieces: chain?.pieces ?? [], claim: chain?.claim))
             }
         }
+        // Pictures side by side in a sentence with only commas between, as "p₁ = 2, p₂ = 3, p₃ = 5,", are one.
+        inlines.sort { ($0.line, $0.range.lowerBound) < ($1.line, $1.range.lowerBound) }
+        var merged: [Inline] = []
+        for piece in inlines {
+            if var last = merged.last, last.line == piece.line, last.pieces.isEmpty, piece.pieces.isEmpty, last.claim == nil, piece.claim == nil,
+               last.range.upperBound <= piece.range.lowerBound,
+               lines[piece.line].text[last.range.upperBound..<piece.range.lowerBound].allSatisfy({ $0.isWhitespace || $0 == "," }),
+               abs(last.rect.midY - piece.rect.midY) < usualHeight * 0.5 {
+                let between = String(lines[piece.line].text[last.range.upperBound..<piece.range.lowerBound])
+                last.text += between + piece.text
+                last.range = last.range.lowerBound..<piece.range.upperBound
+                last.rect = last.rect.union(piece.rect)
+                last.atEnd = piece.atEnd
+                merged[merged.count - 1] = last
+            } else {
+                merged.append(piece)
+            }
+        }
+        inlines = merged
         // An expression that wraps, ending one line and going on at the start of the next line of
         // the same column, becomes one picture with both parts side by side.
         var continuation: [Int: Int] = [:]
@@ -3152,7 +3187,10 @@ enum PDFLayoutAnalyzer {
                     let under = bounds.minY < rect.minY && bounds.maxY > rect.minY - height * 0.6
                         && bounds.minX >= rect.minX - 24 && bounds.maxX <= rect.maxX + 12
                         // An equation, or the next row of a table of values ending where the row above does.
-                        && (lines[index].text.contains("=") && bounds.minX >= rect.minX - 12 || tokens.count >= 5 && abs(bounds.maxX - rect.maxX) < 6)
+                        && (lines[index].text.contains("=") && bounds.minX >= rect.minX - 12 || tokens.count >= 5 && abs(bounds.maxX - rect.maxX) < 6
+                            // or the rest of a sum whose row above ends in its sign, as "solve(x − 3) +" over "solve(x − 4).".
+                            || lines.filter({ $0.block == block }).min(by: { $0.bounds.midY < $1.bounds.midY })
+                                .map({ $0.text.trimmingCharacters(in: .whitespaces).last.map { "+−-×·=,".contains($0) } == true && abs($0.bounds.minX - bounds.minX) < 12 }) == true)
                     guard enclosed || under, !sentenceRow else { continue }
                     if let own = lines[index].block { blocks[own].rect = .null }
                     lines[index].block = block
