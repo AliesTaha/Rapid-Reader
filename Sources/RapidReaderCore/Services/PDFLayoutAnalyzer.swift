@@ -304,7 +304,6 @@ enum PDFLayoutAnalyzer {
             else if caption.midY > rest.maxY { rect.size.height = min(rect.maxY, caption.minY - 1) - rect.minY }
             if rect.height > 4 { blocks[block].rect = rect }
         }
-        if ProcessInfo.processInfo.environment["RR_LINES"] != nil { for (i, l) in lines.enumerated() { FileHandle.standardError.write("LINE \(i) k=\(l.kind.map { "\($0)" } ?? "-") b=\(l.block.map(String.init) ?? "-") [\(Int(l.bounds.minX)),\(Int(l.bounds.minY)) \(Int(l.bounds.width))x\(Int(l.bounds.height))] \(l.text)\n".data(using: .utf8)!) }; for (i, b) in blocks.enumerated() { FileHandle.standardError.write("BLOCK \(i) \(b.kind) \(b.rect)\n".data(using: .utf8)!) } }
         var figures: [PageFigure] = []
         var markersBefore: [Int: [Int]] = [:]
         var figureRects: [Int: CGRect] = [:]
