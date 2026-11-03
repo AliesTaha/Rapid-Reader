@@ -43,6 +43,9 @@ public enum PDFTextExtractor {
             // marked by the layout; they start sections of their own.
             var headings: [(page: Int, line: Int)] = []
             for page in pageLines.indices {
+                // A chapter's number set large over its title, as "Chapter 12", is not read; the
+                // section's title says where it starts.
+                pageLines[page].removeAll { $0.hasPrefix(mark) && $0.dropFirst(mark.count).range(of: #"^(Chapter|Part)\s+([0-9]+|[IVXL]+)$"#, options: .regularExpression) != nil }
                 for line in pageLines[page].indices where pageLines[page][line].contains(mark) {
                     if pageLines[page][line].hasPrefix(mark) { headings.append((page, line)) }
                     pageLines[page][line] = pageLines[page][line].replacingOccurrences(of: mark, with: "")
@@ -399,11 +402,13 @@ public enum PDFTextExtractor {
                 counts[value, default: 0] >= threshold || numbered(value).map { numberedCounts[$0, default: 0] >= 3 } == true
                     || value.range(of: #"^(?:Page\s+)?\d+(?:\s+(?:of|/)\s*\d+)?$|^[ivxlc]{1,7}$"#, options: .regularExpression) != nil
             }
+            // A heading set large, as "Chapter 12" over a chapter's title, is no running header.
+            let heading = PDFLayoutAnalyzer.headingPrint
             let (first, last) = edges(cleaned)
-            if let last, isMargin(plain(cleaned[last])) { cleaned.remove(at: last) }
-            if let first, first != last, isMargin(plain(cleaned[first])) { cleaned.remove(at: first) }
+            if let last, !cleaned[last].hasPrefix(heading), isMargin(plain(cleaned[last])) { cleaned.remove(at: last) }
+            if let first, first != last, !cleaned[first].hasPrefix(heading), isMargin(plain(cleaned[first])) { cleaned.remove(at: first) }
             // Margin notes and side columns can put a running header anywhere in reading order.
-            cleaned.removeAll { numbered(plain($0)).map { numberedCounts[$0, default: 0] >= 3 } == true }
+            cleaned.removeAll { !$0.hasPrefix(heading) && numbered(plain($0)).map { numberedCounts[$0, default: 0] >= 3 } == true }
             return cleaned
         }
         droppingMarginContents(&kept)
@@ -412,8 +417,31 @@ public enum PDFTextExtractor {
         movingNotes(&kept)
         movingPageTopCaptions(&kept)
         return kept.map { page in
+            // The last item of a list ends where a sentence follows it, as in "…whose
+            // highest point is x" + "For example, …".
+            var page = page.map(plain)
+            var listed = false
+            for index in page.indices {
+                let line = page[index]
+                if line.hasPrefix("• ") { listed = true; continue }
+                guard listed, index > 0 else { continue }
+                // A list that ended with its own stop, or a heading after it, closes it.
+                if line.hasPrefix(PDFLayoutAnalyzer.headingPrint) || page[index - 1].range(of: #"[.!?]["”’)]?$"#, options: .regularExpression) != nil {
+                    listed = false
+                    continue
+                }
+                // An item can go on into a display, as "…the definition of δₙ give" + a formula.
+                if PDFLayoutAnalyzer.isMarker(line.trimmingCharacters(in: .whitespaces)) { continue }
+                if line.first?.isUppercase == true {
+                    if page[index - 1].range(of: #"[\p{L}\p{N})\]}’”⁰¹²³⁴⁵⁶⁷⁸⁹]$"#, options: .regularExpression) != nil,
+                       page[index - 1].range(of: #"\b(and|or)$"#, options: .regularExpression) == nil, !PDFLayoutAnalyzer.isMarker(page[index - 1].trimmingCharacters(in: .whitespaces)) {
+                        page[index - 1] += "."
+                    }
+                    listed = false
+                }
+            }
             // Ligature glyphs, as in "Eﬃciency", are spelled out.
-            let joined = page.map(plain).joined(separator: "\n")
+            let joined = page.joined(separator: "\n")
                 .replacingOccurrences(of: "\u{00ad}\n", with: "")
                 .replacingOccurrences(of: "\u{00ad}", with: "")
                 // Punctuation PDFKit set apart after a subscript, as in "dimension dk , and", joins
