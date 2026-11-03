@@ -1594,6 +1594,11 @@ enum PDFLayoutAnalyzer {
         let band = CGRect(x: box.minX, y: low, width: box.width, height: high - low)
         var result: [String: String] = [:]
         var fine: (FineInk, CGFloat)??
+        // A piece of a sentence, as "(x₁, y₁) and (x₂, y₂) is", is read whatever its maths looks like.
+        let spoken = line.split(whereSeparator: \.isWhitespace).contains { token in
+            let letters = String(token.filter(\.isLetter)).lowercased()
+            return letters.count >= 2 && token.allSatisfy(\.isLetter) && isDictionaryWord(letters) && !mathWords.contains(letters)
+        }
         // A citation such as "[46]:" holds no exponent, whatever its old-style figures look like.
         for whole in line.ranges(of: /\S+/) where line[whole].count >= 2 && (candidate(line[whole]) || line[whole].dropFirst().contains("¬"))
             && line[whole].wholeMatch(of: /\[\d+(,\s*\d+)*\][:,.;]?/) == nil {
@@ -1792,7 +1797,7 @@ enum PDFLayoutAnalyzer {
                         let rewritten = String(line[whole.lowerBound..<token.lowerBound]) + indexed + String(line[token.upperBound..<whole.upperBound])
                         // A line of mathematics is cropped whole; drawn finer, its text is not rewritten
                         // so far that it would read as prose.
-                        if measured != nil, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
+                        if measured != nil, !spoken, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
                         result[String(line[whole])] = rewritten
                         break tokens
                     }
@@ -1865,7 +1870,7 @@ enum PDFLayoutAnalyzer {
                     }
                 }
                 let rewritten = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
-                if measured != nil, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
+                if measured != nil, !spoken, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
                 result[String(line[whole])] = rewritten
                 break tokens
             }
