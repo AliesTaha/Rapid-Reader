@@ -301,7 +301,7 @@ enum PDFLayoutAnalyzer {
                     && blocks[$0].rect.minY - bounds.maxY >= -1 && blocks[$0].rect.minY - bounds.maxY < height * 1.6
                     && blocks[$0].rect.maxX > bounds.minX && blocks[$0].rect.minX < bounds.maxX }
                 let span = above.reduce(CGRect.null) { $0.union(blocks[$1].rect) }
-                guard let image = above.min(), bounds.minX >= span.minX - 10, bounds.maxX <= span.maxX + 10 else { continue }
+                guard let image = above.min(), bounds.minX >= span.minX - 30, bounds.maxX <= span.maxX + 30 else { continue }
                 for other in above where other != image {
                     for member in lines.indices where lines[member].block == other { lines[member].block = image }
                     blocks[image].rect = blocks[image].rect.union(blocks[other].rect)

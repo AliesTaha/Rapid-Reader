@@ -580,6 +580,10 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<=[A-Za-z])(\d+[⁰¹²³⁴⁵⁶⁷⁸⁹ⁿᵏᵐⁱˣ]+)(?=[A-Za-z])"#, with: " $1 ", options: .regularExpression)
                 // A sign set against the word after it, as "s =HATTIVATTI", stands apart.
                 .replacingOccurrences(of: #"(?<=\s)=(?=\p{L}{2,})"#, with: "= ", options: .regularExpression)
+                // An arrow between steps stands apart from them, as "6 → 3 → 2".
+                .replacingOccurrences(of: #"(?<=[\p{L}\p{N})])→"#, with: " →", options: .regularExpression)
+                // A root after a slash takes no space, as "n/√n".
+                .replacingOccurrences(of: #"/\s(?=√)"#, with: "/", options: .regularExpression)
                 // A product of figures takes no space after its dot, as "2.4·10¹⁸".
                 .replacingOccurrences(of: #"(?<=\d)·\s(?=\d)"#, with: "·", options: .regularExpression)
                 // A negation sign PDFKit set against the word before, as "are¬ (negation)", stands apart.
@@ -662,6 +666,11 @@ public enum PDFTextExtractor {
         }
         let numbered = lines.filter { plain($0).range(of: #"^\d{1,3}$|\s\d{1,3}$|(\s?\.){3,}\s*\d{1,3}$"#, options: .regularExpression) != nil }.count
         guard numbered >= 8, numbered * 10 >= lines.count * 4 else { return lines }
+        // A contents page is a map of the book, not text to read; its pictures, if any, stay.
+        if lines.contains(where: { plain($0).range(of: #"^(Contents|Table of Contents|CONTENTS)$"#, options: .regularExpression) != nil })
+            || numbered * 10 >= lines.count * 6 {
+            return lines.filter { PDFLayoutAnalyzer.isMarker($0) }
+        }
         return lines.filter { plain($0).range(of: #"^\d{1,3}$"#, options: .regularExpression) == nil }
             // Front matter is numbered in roman figures, as "Preface ix".
             .map { $0.replacingOccurrences(of: #"(\s?\.){3,}\s*\d{1,3}$|(?<=\D)\s+\d{1,3}$|(?<=\p{L})\s+[ivxl]{1,6}$"#, with: "", options: .regularExpression) }
