@@ -359,8 +359,9 @@ enum PDFLayoutAnalyzer {
                     }
                 }
             }
-            // A drawing the edge would cut, as the circle around a node "𝑋1", is taken whole.
-            if block.kind == .formula, let pageInk {
+            // A drawing the edge would cut, as the circle around a node "𝑋1" or around the "5" of a
+            // tree whose box PDFKit gave by its labels, is taken whole.
+            if block.kind == .formula || block.kind == .image, let pageInk {
                 let others = lines.filter { $0.block != index && !$0.text.isEmpty }.map(\.bounds)
                 let grown = pageInk.grownVertically(pageInk.completingGlyphs(crop, left: nil, right: nil), limit: 6)
                 // Only into space no other line uses, so the next display is not half taken.
