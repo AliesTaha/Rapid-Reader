@@ -628,7 +628,7 @@ enum PDFLayoutAnalyzer {
         let heights = lines.map(\.bounds.height).sorted()
         let usualHeight = heights.isEmpty ? lineHeight : max(heights[heights.count / 2], 8)
         struct Inline { var line: Int; var range: Range<String.Index>; var rect: CGRect; var text: String; var atStart: Bool; var atEnd: Bool
-            var pieces: [Int] = []; var claim: (line: Int, range: Range<String.Index>, text: Substring)? }
+            var pieces: [Int] = []; var claim: (line: Int, range: Range<String.Index>, text: Substring)?; var erase: [CGRect] = [] }
         var inlines: [Inline] = []
         // Fragment lines a widened crop covers; they are cleared once every crop is placed.
         var absorbed: Set<Int> = []
@@ -999,6 +999,7 @@ enum PDFLayoutAnalyzer {
                    let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
                 // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first
                 // blank row, a little way at most.
+                var erase: [CGRect] = []
                 if let ink = inlineInk {
                     // Ink of another line's letters, as the tops of the line under it, is never taken:
                     // the crop stops short of it.
@@ -1024,12 +1025,12 @@ enum PDFLayoutAnalyzer {
                     while !ink.blankRow(above: true, of: grown), grown.maxY - rect.maxY < usualHeight * 0.25 { grown.size.height += 0.5 }
                     if grown.maxY > rect.maxY {
                         let others = foreign(CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: grown.maxY - rect.maxY))
-                        let limit = others.map(\.minY).min().map { $0 - 0.3 } ?? grown.maxY
-                        if ink.blankRow(above: true, of: grown), others.isEmpty, limit > rect.maxY { rect.size.height = limit - rect.minY }
+                        let strip = CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: grown.maxY - rect.maxY)
+                        if ink.blankRow(above: true, of: grown), others.isEmpty, strip.height > 0 { rect = grown }
                     }
                 }
                 inlines.append(Inline(line: index, range: expression.range, rect: rect, text: chain?.text ?? String(lines[index].text[expression.range]),
-                                      atStart: expression.atStart, atEnd: expression.atEnd, pieces: chain?.pieces ?? [], claim: chain?.claim))
+                                      atStart: expression.atStart, atEnd: expression.atEnd, pieces: chain?.pieces ?? [], claim: chain?.claim, erase: erase))
             }
         }
         // Pictures side by side in a sentence with only commas between, as "p₁ = 2, p₂ = 3, p₃ = 5,", are one.
@@ -1071,7 +1072,7 @@ enum PDFLayoutAnalyzer {
                 lines[piece.line].text.replaceSubrange(piece.range, with: " ")
                 continue
             }
-            var images = [renderPNG(of: page, rect: piece.rect.insetBy(dx: -1, dy: -1), pageBounds: pageBounds)]
+            var images = [renderPNG(of: page, rect: piece.rect.insetBy(dx: -1, dy: -1), pageBounds: pageBounds, erasing: piece.erase)]
             var text = piece.text
             if let next = continuation[position] {
                 images.append(renderPNG(of: page, rect: inlines[next].rect.insetBy(dx: -1, dy: -1), pageBounds: pageBounds))
