@@ -415,6 +415,7 @@ public enum PDFTextExtractor {
         kept = kept.map(tidyingListings)
         kept = kept.map(raisingFootnoteMarks)
         movingNotes(&kept)
+        keepingNotesInSection(&kept)
         movingPageTopCaptions(&kept)
         return kept.map { page in
             // The last item of a list ends where a sentence follows it, as in "…whose
@@ -433,8 +434,11 @@ public enum PDFTextExtractor {
                 // An item can go on into a display, as "…the definition of δₙ give" + a formula.
                 if PDFLayoutAnalyzer.isMarker(line.trimmingCharacters(in: .whitespaces)) { continue }
                 if line.first?.isUppercase == true {
+                    // An item that wraps, as a book's title over "Contest Training Manual", goes on
+                    // after a capitalised word or a small word such as "the" or "to".
                     if page[index - 1].range(of: #"[\p{L}\p{N})\]}’”⁰¹²³⁴⁵⁶⁷⁸⁹]$"#, options: .regularExpression) != nil,
-                       page[index - 1].range(of: #"\b(and|or)$"#, options: .regularExpression) == nil, !PDFLayoutAnalyzer.isMarker(page[index - 1].trimmingCharacters(in: .whitespaces)) {
+                       page[index - 1].range(of: #"\b(and|or|the|a|an|to|of|in|on|for|from|with|by|at)$|\b\p{Lu}\p{Ll}+$"#, options: .regularExpression) == nil,
+                       !PDFLayoutAnalyzer.isMarker(page[index - 1].trimmingCharacters(in: .whitespaces)) {
                         page[index - 1] += "."
                     }
                     listed = false
@@ -475,7 +479,9 @@ public enum PDFTextExtractor {
                 // A function's name keeps its argument: "f (n)" is "f(n)".
                 .replacingOccurrences(of: #"(?<![\p{L}\p{N}])([fgh]) \("#, with: "$1(", options: .regularExpression)
                 // "O(logn)" and "O(mlogm)" read "O(log n)" and "O(m log m)".
+                .replacingOccurrences(of: #"(?<![\p{L}])([a-z])loglog([a-z])(?![\p{L}(])"#, with: "$1 log log $2", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<![\p{L}])([a-z])log([a-z])(?![\p{L}(])"#, with: "$1 log $2", options: .regularExpression)
+                .replacingOccurrences(of: #"(?<![\p{L}])([a-z])log(?= [a-z]\b)"#, with: "$1 log", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<![\p{L}])log([a-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
                 .replacingOccurrences(of: #"·\s?·\s?·"#, with: "⋯", options: .regularExpression)
@@ -640,6 +646,41 @@ public enum PDFTextExtractor {
             }
         }
         return page
+    }
+
+    /// A footnote set at the foot of its page comes after any heading lower on the page than its
+    /// mark, as "Example" under the sentence marked "Kruskal’s algorithm¹"; it is read before that
+    /// heading, in the section of the sentence it belongs to.
+    static func keepingNotesInSection(_ pages: inout [[String]]) {
+        let small = PDFLayoutAnalyzer.smallPrint, heading = PDFLayoutAnalyzer.headingPrint
+        for page in pages.indices {
+            var index = 0
+            while index < pages[page].count {
+                let line = pages[page][index]
+                guard line.hasPrefix(small), index == 0 || !pages[page][index - 1].hasPrefix(small),
+                      let mark = line.dropFirst(small.count).first, "¹²³⁴⁵⁶⁷⁸⁹".contains(mark) else { index += 1; continue }
+                var end = index + 1
+                while end < pages[page].count, pages[page][end].hasPrefix(small) { end += 1 }
+                // Where the mark is: this page above the note, or the page before.
+                var reference: (page: Int, line: Int)?
+                for candidate in [page, page - 1] where candidate >= 0 {
+                    let upper = candidate == page ? index : pages[candidate].count
+                    if let found = (0..<upper).last(where: { !pages[candidate][$0].hasPrefix(small) && pages[candidate][$0].contains(mark) }) { reference = (candidate, found); break }
+                }
+                guard let reference else { index = end; continue }
+                // The first heading after the mark and before the note.
+                var target: (page: Int, line: Int)?
+                for candidate in reference.page...page where target == nil {
+                    let lower = candidate == reference.page ? reference.line + 1 : 0, upper = candidate == page ? index : pages[candidate].count
+                    if lower < upper, let found = (lower..<upper).first(where: { pages[candidate][$0].hasPrefix(heading) }) { target = (candidate, found) }
+                }
+                guard let target else { index = end; continue }
+                let run = Array(pages[page][index..<end])
+                pages[page].removeSubrange(index..<end)
+                pages[target.page].insert(contentsOf: run, at: target.line)
+                index = target.page == page ? end : index
+            }
+        }
     }
 
     /// A footnote or margin note that reading order put inside a sentence, as "3,7,11,15" +

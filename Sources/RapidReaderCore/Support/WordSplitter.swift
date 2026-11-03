@@ -131,6 +131,19 @@ enum WordSplitter {
         return spread(candidate.words) < spread(current.words)
     }
 
+    /// The spelling service can pass every word while its dictionary still loads; it is asked about
+    /// a word that is none until it says so, once, so every answer after comes from the dictionary.
+    nonisolated(unsafe) private static var warmed = false
+    private static func ready() {
+        guard !warmed else { return }
+        warmed = true
+        for _ in 0..<200 {
+            if NSSpellChecker.shared.checkSpelling(of: "qzxvbn", startingAt: 0, language: "en", wrap: false,
+                                                   inSpellDocumentWithTag: 0, wordCount: nil).location != NSNotFound { return }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+    }
+
     static func isWord(_ word: String) -> Bool {
         // Ligatures such as "ﬀ" are spelled out before checking.
         let plain = word.precomposedStringWithCompatibilityMapping
@@ -138,8 +151,9 @@ enum WordSplitter {
         if let cached = known[plain] { lock.unlock(); return cached }
         lock.unlock()
         let check = {
-            NSSpellChecker.shared.checkSpelling(of: plain, startingAt: 0, language: "en", wrap: false,
-                                                inSpellDocumentWithTag: 0, wordCount: nil).location == NSNotFound
+            ready()
+            return NSSpellChecker.shared.checkSpelling(of: plain, startingAt: 0, language: "en", wrap: false,
+                                                       inSpellDocumentWithTag: 0, wordCount: nil).location == NSNotFound
         }
         // The spelling service expects the main thread.
         let valid = Thread.isMainThread ? check() : DispatchQueue.main.sync(execute: check)

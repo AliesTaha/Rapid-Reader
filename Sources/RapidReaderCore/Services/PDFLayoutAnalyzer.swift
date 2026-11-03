@@ -150,7 +150,8 @@ enum PDFLayoutAnalyzer {
                 let words = lines[index].text.split(whereSeparator: \.isWhitespace)
                 let continued = index > 0 && sizes[index - 1].map { abs($0 - sizes[index]!) < 0.5 } == true
                     && lines[index - 1].bounds.minY - lines[index].bounds.maxY < sizes[index]! * 1.5
-                lines[index].heading = !continued && (1...8).contains(words.count) && words.contains(where: isWord)
+                // A name in capitals, as "IOI" or "ICPC", can be a heading too.
+                lines[index].heading = !continued && (1...8).contains(words.count) && words.contains(where: { isWord($0) || $0.count >= 2 && $0.allSatisfy(\.isUppercase) })
                     && lines[index].text.range(of: #"[.,;:]$"#, options: .regularExpression) == nil
             }
         }
@@ -876,7 +877,7 @@ enum PDFLayoutAnalyzer {
         }
 
         for index in lines.indices where lines[index].block == nil {
-            for (token, spaced) in respacedTokens[index] {
+            for (token, spaced) in respacedTokens[index].sorted(by: { ($0.key.count, $0.key) > ($1.key.count, $1.key) }) {
                 lines[index].text = lines[index].text.replacingOccurrences(of: #"(?<!\S)"# + NSRegularExpression.escapedPattern(for: token) + #"(?!\S)"#,
                                                                            with: NSRegularExpression.escapedTemplate(for: spaced), options: .regularExpression)
             }
@@ -982,7 +983,7 @@ enum PDFLayoutAnalyzer {
         attributed.enumerateAttribute(.font, in: NSRange(location: 0, length: attributed.length)) { font, range, _ in
             if let font = font as? NSFont { sizes[font.pointSize, default: 0] += text.substring(with: range).filter(\.isLetter).count }
         }
-        return sizes.filter { $0.value > 0 }.max { $0.value < $1.value }?.key
+        return sizes.filter { $0.value > 0 }.max { ($0.value, $0.key) < ($1.value, $1.key) }?.key
     }
 
     /// The tokens of a row's pieces in reading order with where each sits, when PDFKit places
@@ -1204,12 +1205,12 @@ enum PDFLayoutAnalyzer {
             attributed.enumerateAttribute(.font, in: NSRange(location: 0, length: attributed.length)) { font, range, _ in
                 if let font = font as? NSFont { sizes[font.pointSize, default: 0] += range.length }
             }
-            return sizes.max { $0.value < $1.value }?.key
+            return sizes.max { ($0.value, $0.key) < ($1.value, $1.key) }?.key
         }
         let sizes = found.map { size($0.selection) }
         var counts: [CGFloat: Int] = [:]
         for size in sizes.compactMap({ $0 }) { counts[(size * 10).rounded() / 10, default: 0] += 1 }
-        let body: CGFloat? = counts.max { $0.value < $1.value }?.key
+        let body: CGFloat? = counts.max { ($0.value, $0.key) < ($1.value, $1.key) }?.key
         let words = found.map { $0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count }
         let hidden = Set(found.indices.filter { index in
             guard let body, let own = sizes[index], abs(own - body) > body * 0.06, words[index] >= 2,
@@ -1699,7 +1700,7 @@ enum PDFLayoutAnalyzer {
             selection.add(found[next].selection)
             // Tokens are rewritten while they stand alone, before a full stop can join one.
             var tail = found[next].text
-            for (token, spaced) in respacedTokens[next] {
+            for (token, spaced) in respacedTokens[next].sorted(by: { ($0.key.count, $0.key) > ($1.key.count, $1.key) }) {
                 tail = tail.replacingOccurrences(of: #"(?<!\S)"# + NSRegularExpression.escapedPattern(for: token) + #"(?!\S)"#,
                                                  with: NSRegularExpression.escapedTemplate(for: spaced), options: .regularExpression)
             }
