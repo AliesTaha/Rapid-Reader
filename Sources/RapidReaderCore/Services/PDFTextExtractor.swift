@@ -448,6 +448,35 @@ public enum PDFTextExtractor {
         movingNotes(&kept)
         keepingNotesInSection(&kept)
         droppingNoteMarks(&kept)
+        // A note never parts a lead-in, as "… z[8] = 0:", from the picture it leads into.
+        for page in kept.indices {
+            var index = 1
+            while index < kept[page].count {
+                let small = PDFLayoutAnalyzer.smallPrint
+                guard kept[page][index].hasPrefix(small), !kept[page][index - 1].hasPrefix(small),
+                      kept[page][index - 1].trimmingCharacters(in: .whitespaces).hasSuffix(":") else { index += 1; continue }
+                var end = index
+                while end < kept[page].count, kept[page][end].hasPrefix(small) { end += 1 }
+                var after = end
+                while after < kept[page].count, PDFLayoutAnalyzer.isMarker(kept[page][after]) { after += 1 }
+                // The picture can open the next page.
+                if after == end, end == kept[page].count, page + 1 < kept.count {
+                    var opening = 0
+                    while opening < kept[page + 1].count, PDFLayoutAnalyzer.isMarker(kept[page + 1][opening]) { opening += 1 }
+                    if opening > 0 {
+                        let run = Array(kept[page][index..<end])
+                        kept[page].removeSubrange(index..<end)
+                        kept[page + 1].insert(contentsOf: run, at: opening)
+                        break
+                    }
+                }
+                guard after > end else { index = end; continue }
+                let run = Array(kept[page][index..<end])
+                kept[page].insert(contentsOf: run, at: after)
+                kept[page].removeSubrange(index..<end)
+                index = after
+            }
+        }
         movingPageTopCaptions(&kept)
         return kept.map { page in
             // The last item of a list ends where a sentence follows it, as in "…whose

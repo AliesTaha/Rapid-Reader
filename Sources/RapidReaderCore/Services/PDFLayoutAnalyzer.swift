@@ -153,13 +153,16 @@ enum PDFLayoutAnalyzer {
             // A heading is a few words set well above the body size, ending without punctuation.
             // A heading over several lines, as a title and its subtitle, is one: only its first line
             // starts it.
-            for index in lines.indices where sizes[index].map({ $0 >= body * 1.2 }) == true && lines[index].kind == nil {
+            // One with mathematics in it, as "Case c = 1", opens with a capitalised word.
+            for index in lines.indices where sizes[index].map({ $0 >= body * 1.2 }) == true && (lines[index].kind == nil
+                || lines[index].kind == .formula && lines[index].text.range(of: #"^\p{Lu}\p{Ll}{2,}\s"#, options: .regularExpression) != nil) {
                 let words = lines[index].text.split(whereSeparator: \.isWhitespace)
                 let continued = index > 0 && sizes[index - 1].map { abs($0 - sizes[index]!) < 0.5 } == true
                     && lines[index - 1].bounds.minY - lines[index].bounds.maxY < sizes[index]! * 1.5
                 // A name in capitals, as "IOI" or "ICPC", can be a heading too.
                 lines[index].heading = !continued && (1...8).contains(words.count) && words.contains(where: { isWord($0) || $0.count >= 2 && $0.allSatisfy(\.isUppercase) })
                     && lines[index].text.range(of: #"[.,;:]$"#, options: .regularExpression) == nil
+                if lines[index].heading { lines[index].kind = nil }
             }
         }
         // PDFKit can report a sentence's box tall enough to cover the display beside it, as for
@@ -1930,6 +1933,18 @@ enum PDFLayoutAnalyzer {
             let key = lead + String(line[next]) + trailing
             let radicandText = cut.map { String(line[next].prefix($0)) + " " + String(line[next].dropFirst($0)) } ?? written(String(line[next]))
             result[key] = leadValue + "√" + radicandText + trailing
+        }
+        // A sign drawn without a character can open the line, as the "∅" of "∅, {2}, {4}".
+        // It stands before punctuation there, as a list's first item does.
+        if tokens.count >= 2, line[tokens[0]].first.map({ ",;)}]".contains($0) }) == true, let first = bounds(tokens[0]), let fine = ink.finer(page) {
+            // Its glyph can reach into the box of the token after it.
+            let area = CGRect(x: first.minX - size * 1.1, y: baseline - size * 0.35, width: size * 1.1 + 1.5, height: size * 1.25)
+            if ink.glyphColumns(in: CGRect(x: area.minX, y: area.minY, width: size * 1.1 - 0.4, height: area.height)).count == 1,
+               fine.signs(in: area, baseline: baseline, size: size, seatedRing: true)?.hasPrefix("∅") == true {
+                let key = String(line[tokens[0]]) + " " + String(line[tokens[1]])
+                let closing = line[tokens[0]].first.map { ")}],;.".contains($0) } == true
+                result[key] = "∅" + (closing ? "" : " ") + key
+            }
         }
         var chained: (key: String, value: String, end: Int)?
         // Other signs drawn without a character, in the space between two tokens: "···" in
@@ -4167,7 +4182,8 @@ enum PDFLayoutAnalyzer {
             // the text read before it is above the picture.
             guard !lines[index].small, !lines[index].text.isEmpty, bounds.maxX <= rect.minX else { return false }
             let previous = lines[..<index].last { $0.block == nil && !$0.text.isEmpty }
-            return previous.map { $0.bounds.midY > rect.maxY } ?? false
+            // or nothing is read before it on the page.
+            return previous.map { $0.bounds.midY > rect.maxY } ?? true
         } ?? lines.count
     }
 
@@ -4332,7 +4348,7 @@ private struct FineInk {
 
     /// The signs drawn in `area` without characters, told by their shape, as "∅," or "\\"; nil
     /// when any glyph there is something else.
-    func signs(in area: CGRect, baseline: CGFloat, size: CGFloat) -> String? {
+    func signs(in area: CGRect, baseline: CGFloat, size: CGFloat, seatedRing: Bool = false) -> String? {
         // Slivers of the neighbouring letters at the area's edges are no signs.
         let found = glyphs(in: area).filter { glyph in
             let width = glyph.span.upperBound - glyph.span.lowerBound
@@ -4377,7 +4393,9 @@ private struct FineInk {
                 let sideRuns = middle.map(runs(row:))
                 // The ring's stroke reaches below the baseline and well above the letters' middle.
                 let hangs = glyph.bottom <= baseline - size * 0.04 && glyph.top >= baseline + size * 0.6
-                if hangs, (0.55...1.25).contains(ratio), median(rowRuns) >= 3 || median(rowRuns) == 2 && median(columnRuns) >= 3 {
+                // Some fonts set it on the baseline; drawn without a character, a ring and a stroke are still it.
+                let seated = seatedRing && glyph.bottom <= baseline + 0.5 && glyph.top >= baseline + size * 0.6
+                if hangs || seated, (0.55...1.25).contains(ratio), median(rowRuns) >= 3 || median(rowRuns) == 2 && median(columnRuns) >= 3 {
                     result += "∅"
                 } else if hangs, ratio <= 0.8, rowRuns.allSatisfy({ $0 == 1 }), let first = runs(row: top).first, let last = runs(row: bottom).first,
                           last.lowerBound - first.lowerBound >= (right - left) / 2 {
