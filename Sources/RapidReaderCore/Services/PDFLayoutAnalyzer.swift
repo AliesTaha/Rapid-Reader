@@ -2405,7 +2405,13 @@ enum PDFLayoutAnalyzer {
         var changed = true
         while changed {
             changed = false
-            for index in lines.indices where lines[index].block == nil && !lines[index].small {
+            // A short row PDFKit made a block of its own, as the "x=1" under a sum, counts too.
+            func alone(_ index: Int) -> Bool {
+                guard let own = lines[index].block else { return true }
+                return blocks[own].kind != .image && lines[index].text.count <= 8 && !lines.indices.contains { $0 != index && lines[$0].block == own }
+            }
+            // A limit set small under a sum is no footnote.
+            for index in lines.indices where alone(index) && (!lines[index].small || lines[index].text.count <= 8) {
                 let bounds = lines[index].bounds
                 let tokens = lines[index].text.split(whereSeparator: \.isWhitespace)
                 // Prose has words; a row of mathematics only names and the words of a case, as "mod"
@@ -2415,7 +2421,7 @@ enum PDFLayoutAnalyzer {
                     let letters = wordLetters(token).lowercased()
                     return !isWord(token) || letters.count < 3 || mathWords.contains(letters) || cases.contains(letters) || !isDictionaryWord(letters)
                 }) else { continue }
-                for block in blocks.indices where blocks[block].kind == .formula && !blocks[block].rect.isNull {
+                for block in blocks.indices where blocks[block].kind == .formula && !blocks[block].rect.isNull && block != lines[index].block {
                     let rect = blocks[block].rect
                     let inside = bounds.intersection(rect)
                     let enclosed = !inside.isNull && inside.width * inside.height >= bounds.width * bounds.height * 0.8
@@ -2433,6 +2439,7 @@ enum PDFLayoutAnalyzer {
                     let under = bounds.minY < rect.minY && bounds.maxY > rect.minY - height * 0.6
                         && bounds.minX >= rect.minX - 12 && bounds.maxX <= rect.maxX + 12 && lines[index].text.contains("=")
                     guard enclosed || under, !sentenceRow else { continue }
+                    if let own = lines[index].block { blocks[own].rect = .null }
                     lines[index].block = block
                     lines[index].kind = .formula
                     blocks[block].rect = rect.union(bounds)
