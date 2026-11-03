@@ -113,8 +113,15 @@ public enum PDFTextExtractor {
                       line.first.map({ $0.isLetter || $0.isNumber && $0.isASCII }) == true,
                       line.range(of: #"^[A-Z]?\d+(\.\d+)*\s.*\s\d+$"#, options: .regularExpression) == nil,
                       let after = entries.lastIndex(where: { $0.start <= found }) else { continue }
-                // Its number, as the "A.1" of "A.1 Proof of Equation 6.1", is not read in a title.
-                entries.insert((found, line.replacingOccurrences(of: #"^([A-Z]|\d+)(\.\d+)*\.?\s+(?=\p{L})"#, with: "", options: .regularExpression)), at: after + 1)
+                // Its number, as the "A.1" of "A.1 Proof of Equation 6.1", is not read in a title, and a
+                // picture in it, as the "int8" set as code in "Exercise 1.2 [int8 matmul]", is its text.
+                var title = line.replacingOccurrences(of: #"^([A-Z]|\d+)(\.\d+)*\.?\s+(?=\p{L})"#, with: "", options: .regularExpression)
+                for match in title.matches(of: /\s*RRFIGUREMARKER(\d+)\s*/).reversed() {
+                    let words = Int(match.output.1).flatMap { $0 < figures.count ? figures[$0].text : nil }?
+                        .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces) ?? ""
+                    title.replaceSubrange(match.range, with: words.isEmpty ? " " : " \(words) ")
+                }
+                entries.insert((found, title.trimmingCharacters(in: .whitespaces)), at: after + 1)
                 added.append(found)
             }
             // Entries whose heading could not be told apart from the one before share its start;
@@ -701,7 +708,9 @@ public enum PDFTextExtractor {
                 lines.append(line)
             }
         }
-        let numbered = lines.filter { plain($0).range(of: #"^\d{1,3}$|\s\d{1,3}$|(\s?\.){3,}\s*\d{1,3}$"#, options: .regularExpression) != nil }.count
+        // PDFKit can part an entry into its number, its title with the dot leaders and its page,
+        // as "4.7.1" + "Appendix A: … . . . ." + "51"; each piece is part of an entry.
+        let numbered = lines.filter { plain($0).range(of: #"^\d{1,3}$|\s\d{1,3}$|(\s?\.){3,}\s*\d{1,3}$|(\s\.){5,}\s*$|^\s*[A-Z]?\d+(\.\d+)+\s*$"#, options: .regularExpression) != nil }.count
         guard numbered >= 8, numbered * 10 >= lines.count * 4 else { return lines }
         // A contents page is a map of the book, not text to read; its pictures, if any, stay.
         if lines.contains(where: { plain($0).range(of: #"^[^\p{L}]*(Contents|Table of Contents|CONTENTS)$"#, options: .regularExpression) != nil })

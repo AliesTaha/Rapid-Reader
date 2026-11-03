@@ -621,7 +621,8 @@ enum PDFLayoutAnalyzer {
             if block.kind == .formula, position < lines.count {
                 let below = lines.indices.first { lines[$0].block == nil && !lines[$0].text.isEmpty && lines[$0].bounds.midY < block.rect.minY
                     && lines[$0].bounds.maxX > block.rect.minX && lines[$0].bounds.minX < block.rect.maxX } ?? lines.count
-                let between = (position..<min(below, lines.count)).filter { lines[$0].block == nil && !lines[$0].text.isEmpty }
+                // The first line below can come before the block's own place, as when PDFKit lists it early.
+                let between = below > position ? (position..<min(below, lines.count)).filter { lines[$0].block == nil && !lines[$0].text.isEmpty } : []
                 if below > position, !between.isEmpty, between.allSatisfy({ lines[$0].bounds.minY > block.rect.midY }) {
                     position = below
                 }
@@ -647,6 +648,7 @@ enum PDFLayoutAnalyzer {
 
         // Inline expressions in sentences are shown as typeset, where PDFKit's positions hold up.
         let inlineInk = pageInk
+        let fromWeb = printedFromWeb(page)
         let heights = lines.map(\.bounds.height).sorted()
         let usualHeight = heights.isEmpty ? lineHeight : max(heights[heights.count / 2], 8)
         struct Inline { var line: Int; var range: Range<String.Index>; var rect: CGRect; var text: String; var atStart: Bool; var atEnd: Bool
@@ -770,9 +772,14 @@ enum PDFLayoutAnalyzer {
                     return above ? max(half, line.minY - 0.5) : min(half, line.maxY + 0.5)
                 }
                 var pictures: [Int: (marker: String, figure: PageFigure)] = [:]
+                var written: Set<Int> = []
                 var complete = true
                 for run in runs {
                     var rect = run.reduce(CGRect.null) { $0.union(tokens[$1].rect) }
+                    if fromWeb, isOneRow(rect, on: page, ink: ink) {
+                        written.formUnion(run)
+                        continue
+                    }
                     // Pieces of the row inside the run, as a numerator or an accent, are part of it.
                     for member in row where lines[member].bounds.minX >= rect.minX - 1 && lines[member].bounds.maxX <= rect.maxX + 1 { rect = rect.union(lines[member].bounds) }
                     rect = rect.union(CGRect(x: rect.minX, y: seedLine.minY, width: rect.width, height: seedLine.height))
@@ -791,7 +798,7 @@ enum PDFLayoutAnalyzer {
                 guard complete else { continue }
                 var text: [String] = []
                 for position in tokens.indices {
-                    if let picture = pictures[position] { text.append(picture.marker) } else if !runs.contains(where: { $0.contains(position) }) { text.append(tokens[position].text) }
+                    if let picture = pictures[position] { text.append(picture.marker) } else if written.contains(position) || !runs.contains(where: { $0.contains(position) }) { text.append(tokens[position].text) }
                 }
                 for start in pictures.keys.sorted() { figures.append(pictures[start]!.figure) }
                 let holder = row.min()!
@@ -1018,7 +1025,7 @@ enum PDFLayoutAnalyzer {
                 let afterName = line[..<range.lowerBound].range(of: #"\p{L}{2,}\s$"#, options: .regularExpression) != nil
                 if afterName, whole.range(of: #"^\s*[=<>≤≥≈]"#, options: .regularExpression) != nil { whole = "x " + whole }
                 // Braces stretch a box as far as its line's, as on "if coins = {1,3,4}".
-                if chain == nil, apart, rect.height <= max(usualHeight * 1.35, lines[index].bounds.height + 0.5), isPlainMath(whole),
+                if chain == nil, apart || fromWeb, fromWeb || rect.height <= max(usualHeight * 1.35, lines[index].bounds.height + 0.5), fromWeb || isPlainMath(whole),
                    let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
                 // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first
                 // blank row, a little way at most.
@@ -1166,6 +1173,7 @@ enum PDFLayoutAnalyzer {
                 let own = lines[index].bounds
                 // Plain mathematics that opens or closes a row of prose beside it, as the "−2⁶³...2⁶³" PDFKit
                 // split from "− 1 or about…", is read with it.
+                if fromWeb, isOneRow(own, on: page, ink: ink) { continue }
                 if isPlainMath(text), lines.contains(where: { other in
                     other.block == nil && sameRow(other.bounds, own) && (other.bounds.minX - own.maxX >= -1 && other.bounds.minX - own.maxX < 6 || own.minX - other.bounds.maxX >= -1 && own.minX - other.bounds.maxX < 6)
                         && other.text.split(whereSeparator: \.isWhitespace).filter({ isProseToken(String($0)) }).count >= 2
@@ -2407,13 +2415,25 @@ enum PDFLayoutAnalyzer {
 
     /// Mathematics that reads as it is written: names, figures and common signs, with no index
     /// left on the line as "x1", no accent and no Greek or mathematical letters.
+    /// A page a web browser printed sets its mathematics as text, in the page's own characters;
+    /// what lies on one row there reads as it is written, unlike TeX's symbols.
+    static func printedFromWeb(_ page: PDFPage) -> Bool {
+        guard let attributes = page.document?.documentAttributes else { return false }
+        let creator = attributes[PDFDocumentAttribute.creatorAttribute] as? String ?? ""
+        let producer = attributes[PDFDocumentAttribute.producerAttribute] as? String ?? ""
+        return producer.hasPrefix("Skia/PDF") || creator.hasPrefix("Mozilla/") || creator.contains("WebKit")
+    }
+
     static func isPlainMath(_ text: String) -> Bool {
-        let signs = Set(" (){}[],.;:=+−-×·<>≤≥≠∈∉∪∩⊂⊆&|/!'′…⋯~^∞∅⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻ⁿⁱᵏᵐˣ₀₁₂₃₄₅₆₇₈₉ₙᵢⱼₖₘ₋₊")
+        // Figures with an error, a share or a trend, as "(−0.05 ± 0.61," "85.5%" or "→ 0.34", are written too.
+        let signs = Set(" (){}[],.;:=+−-×·<>≤≥≠≈∈∉∪∩⊂⊆&|/!'′…⋯~^∞∅±%–→⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻ⁿⁱᵏᵐˣ₀₁₂₃₄₅₆₇₈₉ₙᵢⱼₖₘ₋₊")
         // Every name is a letter, a word or a function's name; "dmodel" hides an index.
+        // A figure in scientific notation, as "4.2e11" or "4.59E+14", is one number.
+        let text = text.replacingOccurrences(of: #"(?<![\p{L}\d.])\d+(\.\d+)?[eE][+−-]?\d+(?![\p{L}\d])"#, with: "1", options: .regularExpression)
         let names = text.split(whereSeparator: { !$0.isLetter }).map { String($0).lowercased() }
         return !text.isEmpty && text.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) || signs.contains($0) }
             && text.range(of: #"\p{L}\d|\)\d|;\s*=|^\s*[=<>≤≥≈]"#, options: .regularExpression) == nil
-            && text.contains(where: { "=<>≤≥≠∈∉∪∩&|+−-×(".contains($0) })
+            && text.contains(where: { "=<>≤≥≠≈∈∉∪∩&|+−-×(±→".contains($0) })
             && text.filter({ "([{".contains($0) }).count == text.filter({ ")]}".contains($0) }).count
             && names.allSatisfy { $0.count == 1 || mathWords.contains($0) || ["and", "or", "if", "for", "mod", "then"].contains($0) }
     }
@@ -3777,9 +3797,71 @@ enum PDFLayoutAnalyzer {
             let body = lines.indices.filter { lines[$0].bounds.midY < top && lines[$0].bounds.midY > bottom - 1 && lines[$0].bounds.minX >= left }
             tables.append((body.reduce(CGRect.null) { $0.union(lines[$1].bounds) }, body, [], .code))
         }
+        // A table ruled between its rows, as web pages print them: three or more rules of one width,
+        // close one under the next, with columns between them that a gutter or a grid line parts.
+        // A box around a paragraph has two rules and no gutter.
+        let ink = InkMap(page: page, bounds: bounds)
+        if let ink {
+            let rules = ink.horizontalRules(minimumWidth: max(120, bounds.width * 0.25)).sorted { $0.midY > $1.midY }
+            var used: Set<Int> = []
+            for first in rules.indices where !used.contains(first) {
+                var stack = [first]
+                for next in rules.indices where next > first && !used.contains(next) {
+                    let last = rules[stack.last!], rule = rules[next]
+                    guard abs(rule.minX - last.minX) <= 3, abs(rule.maxX - last.maxX) <= 3 else { continue }
+                    // Cells can hold a paragraph; a line across the whole width between two rules, as
+                    // prose between section rules, is no row.
+                    guard last.midY - rule.midY <= lineHeight * 16, !lines.contains(where: { line in
+                        !line.text.isEmpty && line.bounds.midY < last.minY && line.bounds.midY > rule.maxY && line.bounds.width >= rule.width * 0.85
+                            && ink.gutters(in: line.bounds.insetBy(dx: 2, dy: 1), skipping: [], atLeast: 6).isEmpty
+                    }) else { break }
+                    stack.append(next)
+                }
+                guard stack.count >= 3 else { continue }
+                let top = rules[stack.first!], bottom = rules[stack.last!]
+                var rect = CGRect(x: top.minX, y: bottom.minY, width: top.width, height: top.maxY - bottom.minY)
+                func inside(_ line: Line) -> Bool {
+                    line.bounds.midY < rect.maxY && line.bounds.midY > rect.minY && line.bounds.minX >= rect.minX - 2 && line.bounds.maxX <= rect.maxX + 2
+                }
+                // Columns: a gutter inside the table, away from its sides.
+                let rows = stack.map { rules[$0] }
+                func columns(_ area: CGRect) -> [Range<CGFloat>] {
+                    ink.gutters(in: area.insetBy(dx: 0, dy: 1), skipping: rows, atLeast: 6).filter { $0.lowerBound > area.minX + 12 && $0.upperBound < area.maxX - 12 }
+                }
+                let inner = columns(rect)
+                guard !inner.isEmpty else { continue }
+                // A header row can stand over the first rule, inside its width, set in the same
+                // columns; the sentence leading into the table runs across them.
+                let header = lines.indices.filter { lines[$0].bounds.midY > top.maxY && lines[$0].bounds.minY - top.maxY < lineHeight
+                    && lines[$0].bounds.minX >= top.minX - 2 && lines[$0].bounds.maxX <= top.maxX + 2 && !lines[$0].text.isEmpty }
+                // The lead-in ends its sentence, as "Paired on the same 4,200 validation rows:"; a header does not.
+                if !header.isEmpty, !header.contains(where: { lines[$0].text.trimmingCharacters(in: .whitespaces).range(of: #"[.:;]$"#, options: .regularExpression) != nil }),
+                   !lines.contains(where: { line in
+                    line.bounds.midY > top.maxY && line.bounds.minY - top.maxY < lineHeight && !(line.bounds.minX >= top.minX - 2 && line.bounds.maxX <= top.maxX + 2) && !line.text.isEmpty
+                }) {
+                    let span = header.reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+                    let grown = rect.union(span), kept = columns(grown)
+                    let crossed = inner.filter { $0.lowerBound > span.minX && $0.upperBound < span.maxX }
+                    if !kept.isEmpty, crossed.allSatisfy({ gutter in kept.contains { min($0.upperBound, gutter.upperBound) - max($0.lowerBound, gutter.lowerBound) >= 4 } }) { rect = grown }
+                }
+                let body = lines.indices.filter { inside(lines[$0]) }
+                guard body.count >= 3, !tables.contains(where: { $0.rect.intersects(rect) }) else { continue }
+                // A picture or a listing already found there, as boxed code or an array of cells, is
+                // not a table; nor are boxes a sentence runs between, as "Now the code" between listings.
+                guard !blocks.contains(where: { block in
+                          guard block.kind == .image || block.kind == .code, !block.rect.isNull else { return false }
+                          let overlap = block.rect.intersection(rect.insetBy(dx: 2, dy: 2))
+                          return !overlap.isNull && overlap.width * overlap.height >= rect.width * rect.height * 0.3
+                      }),
+                      !lines.contains(where: { line in
+                          !line.text.isEmpty && line.bounds.midY < rect.maxY && line.bounds.midY > rect.minY && line.bounds.maxX > rect.minX && line.bounds.minX < rect.maxX && !inside(line)
+                      }) else { continue }
+                used.formUnion(stack)
+                tables.append((rect.insetBy(dx: -1, dy: -1), body, [], .table))
+            }
+        }
         guard !tables.isEmpty else { return }
         // Rules above, below and between the rows reach past the text.
-        let ink = InkMap(page: page, bounds: bounds)
         for table in tables {
             let rect = ink?.widened(table.rect) ?? table.rect
             let number = blocks.count
@@ -5079,6 +5161,69 @@ private struct InkMap {
     }
 
     /// The runs of rows inside `rect` that hold ink, from the bottom up, in page coordinates.
+    /// Thin rules drawn across a stretch of the page, however light, as the lines between the rows
+    /// of a table: rows inked evenly along a long run, a pixel or two thick, darker than the rows
+    /// beside them. A shaded box is no rule, nor is a line of text set on the shading.
+    func horizontalRules(minimumWidth: CGFloat) -> [CGRect] {
+        let least = max(40, Int(minimumWidth))
+        var rules: [CGRect] = []
+        func mean(_ row: Int, _ span: Range<Int>) -> Double {
+            guard row >= 0, row < height else { return 255 }
+            return Double(span.reduce(0) { $0 + Int(pixels[row * width + $1]) }) / Double(span.count)
+        }
+        for row in 1..<max(1, height - 2) {
+            var column = 0
+            while column < width {
+                guard pixels[row * width + column] < 250 else { column += 1; continue }
+                let start = column
+                var gap = 0
+                while column < width, gap <= 2 {
+                    gap = pixels[row * width + column] < 250 ? 0 : gap + 1
+                    column += 1
+                }
+                let end = column - gap
+                guard end - start >= least else { continue }
+                let span = start..<end
+                // Even along its length: a row through letters is not.
+                let values = span.map { Int(pixels[row * width + $0]) }.sorted()
+                let median = values[values.count / 2]
+                guard values.filter({ abs($0 - median) <= 25 }).count * 10 >= values.count * 9 else { continue }
+                let here = mean(row, span)
+                // One pixel thick, or two with the next row as dark.
+                let thick = mean(row + 1, span) <= here + 8
+                let below = mean(row + (thick ? 2 : 1), span), above = mean(row - 1, span)
+                guard here + 8 <= above, here + 8 <= below else { continue }
+                let rule = CGRect(x: bounds.minX + CGFloat(start), y: bounds.maxY - CGFloat(row + (thick ? 2 : 1)), width: CGFloat(end - start), height: thick ? 2 : 1)
+                if !rules.contains(where: { $0.insetBy(dx: 0, dy: -1).intersects(rule) }) { rules.append(rule) }
+            }
+        }
+        return rules
+    }
+
+    /// Runs of columns in `rect` with no dark ink, outside the rows in `skipping`: the gutters
+    /// between a table's columns. Light grid lines and shading are not dark.
+    func gutters(in rect: CGRect, skipping: [CGRect], atLeast minimum: Int) -> [Range<CGFloat>] {
+        let left = max(0, Int(rect.minX - bounds.minX)), right = min(width - 1, Int(rect.maxX - bounds.minX))
+        let top = max(0, Int(bounds.maxY - rect.maxY)), bottom = min(height - 1, Int(bounds.maxY - rect.minY))
+        guard left < right, top < bottom else { return [] }
+        let rows = (top...bottom).filter { row in
+            let y = bounds.maxY - CGFloat(row) - 0.5
+            return !skipping.contains { $0.insetBy(dx: 0, dy: -1).minY <= y && $0.insetBy(dx: 0, dy: -1).maxY >= y }
+        }
+        var result: [Range<CGFloat>] = []
+        var run: Int?
+        for column in left...right {
+            let blank = !rows.contains { pixels[$0 * width + column] < 160 }
+            if blank, run == nil { run = column }
+            if !blank || column == right, let start = run {
+                let end = blank ? column + 1 : column
+                if end - start >= minimum { result.append((bounds.minX + CGFloat(start))..<(bounds.minX + CGFloat(end))) }
+                run = nil
+            }
+        }
+        return result
+    }
+
     func rowBands(in rect: CGRect) -> [Range<CGFloat>] {
         let left = max(0, Int(rect.minX - bounds.minX)), right = min(width - 1, Int(rect.maxX - bounds.minX))
         let top = max(0, Int(bounds.maxY - rect.maxY)), bottom = min(height - 1, Int(bounds.maxY - rect.minY))
