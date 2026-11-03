@@ -116,6 +116,20 @@ enum PDFLayoutAnalyzer {
             }
         }
         found = placingRowLabels(found, on: page)
+        // A line PDFKit listed one too late, as a display "B = …" after the line under it, goes back
+        // between the lines it stands between.
+        if found.count >= 3 {
+            var boxes = found.map { $0.selection.bounds(for: page) }
+            let usual = boxes.map(\.height).sorted()[boxes.count / 2]
+            for index in 1..<(found.count - 1) {
+                let before = boxes[index - 1], current = boxes[index], next = boxes[index + 1]
+                guard [before, current, next].allSatisfy({ $0.height <= usual * 2 }), found[index + 1].text.count >= 3, found[index].text.count >= 3,
+                      next.midY > current.maxY, next.midY < before.minY, min(next.maxY, current.maxY) - max(next.minY, current.minY) <= 0,
+                      min(next.maxX, current.maxX) > max(next.minX, current.minX) || min(next.maxX, before.maxX) > max(next.minX, before.minX) else { continue }
+                found.swapAt(index, index + 1)
+                boxes.swapAt(index, index + 1)
+            }
+        }
         found = joiningDetachedPowers(found, on: page)
         var respacedTokens = found.map { spacedVariables(in: $0.text) }
         if let pageInk {
