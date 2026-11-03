@@ -281,7 +281,14 @@ enum PDFLayoutAnalyzer {
             guard lines[last].bounds.minY - lines[next].bounds.maxY >= 3 else { continue }
             blocks.append(Block(kind: .formula, rect: leading.reduce(CGRect.null) { $0.union(lines[$1].bounds) }, firstLine: leading.min()))
             for member in leading { lines[member].block = blocks.count - 1 }
-            blocks[block].rect = members.dropFirst(leading.count).reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+            // The listing keeps its frame, which reaches past its lines; only the display's rows leave it.
+            let listing = members.dropFirst(leading.count).reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+            let frame = blocks[block].rect
+            let top = max(listing.maxY, lines[last].bounds.minY - 0.5)
+            var kept = frame.maxY > top ? CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: top - frame.minY).union(listing) : listing
+            // The display's sides no longer bound it: the frame's ink does.
+            if let pageInk, let drawn = pageInk.inkBounds(in: kept, excluding: []) { kept = drawn.union(listing) }
+            blocks[block].rect = kept
             if blocks[block].firstLine != nil { blocks[block].firstLine = members.dropFirst(leading.count).min() }
         }
         // Captions under a picture, as "Euclidean distance   Manhattan distance" under two drawings, are
