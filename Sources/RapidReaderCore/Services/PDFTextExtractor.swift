@@ -168,8 +168,10 @@ public enum PDFTextExtractor {
                     // Dictionaries take abbreviations such as "cu" for words; few two-letter words are real.
                     let strays = pieces.filter { $0.count == 1 ? !["a", "A", "I"].contains($0) : !twoLetterWords.contains($0.lowercased()) }.count
                     let pronoun = pieces.count == 2 && pieces[0] == "I" && ["f", "t", "n", "s"].contains(pieces[1])
-                    if word.count >= 3 || pronoun, strays >= 2 || pronoun, word.range(of: #"^[A-Za-z][a-z]+$"#, options: .regularExpression) != nil,
-                       WordSplitter.isWord(word) || pronoun {
+                    // Capitals set wide, as "DA YS" in "KIDS THESE DAYS", rejoin too.
+                    let capitals = word.range(of: #"^[A-Z]{3,}$"#, options: .regularExpression) != nil
+                    if word.count >= 3 || pronoun, strays >= 2 || pronoun, word.range(of: #"^[A-Za-z][a-z]+$"#, options: .regularExpression) != nil || capitals,
+                       WordSplitter.isWord(capitals ? word.lowercased() : word) || pronoun {
                         tokens.replaceSubrange(start...last, with: [word + tokens[last].dropFirst(pieces.last!.count)])
                         break
                     }
@@ -378,6 +380,16 @@ public enum PDFTextExtractor {
             }
         }
         let threshold = max(3, Int(ceil(Double(pages.count) * 0.7)))
+        // A browser's print header and footer, as "11/3/26, 2:15 AM" or "https://… 3/10", repeat on
+        // every page with their figures changed, wherever reading order puts them.
+        func figuresAside(_ value: String) -> String { value.replacingOccurrences(of: #"\d+"#, with: "#", options: .regularExpression) }
+        var anywhere: [String: Int] = [:]
+        for page in lines {
+            for line in Set(page.filter { $0.count <= 100 && !PDFLayoutAnalyzer.isMarker($0) }.map(figuresAside)) { anywhere[line, default: 0] += 1 }
+        }
+        func furniture(_ value: String) -> Bool {
+            value.count <= 100 && (value.contains(where: \.isNumber) && value.contains(where: \.isLetter) || value.contains("://")) && anywhere[figuresAside(value), default: 0] >= threshold
+        }
         // Printed page numbers trail the page index by a fixed amount; once that is known, a page's
         // own number goes wherever reading order put it, as after margin notes.
         var offsets: [Int: Int] = [:]
@@ -411,7 +423,7 @@ public enum PDFTextExtractor {
             if let last, !cleaned[last].hasPrefix(heading), isMargin(plain(cleaned[last])) { cleaned.remove(at: last) }
             if let first, first != last, !cleaned[first].hasPrefix(heading), isMargin(plain(cleaned[first])) { cleaned.remove(at: first) }
             // Margin notes and side columns can put a running header anywhere in reading order.
-            cleaned.removeAll { !$0.hasPrefix(heading) && numbered(plain($0)).map { numberedCounts[$0, default: 0] >= 3 } == true }
+            cleaned.removeAll { !$0.hasPrefix(heading) && (numbered(plain($0)).map { numberedCounts[$0, default: 0] >= 3 } == true || furniture(plain($0))) }
             return cleaned
         }
         droppingMarginContents(&kept)

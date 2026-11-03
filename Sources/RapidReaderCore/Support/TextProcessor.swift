@@ -242,7 +242,9 @@ public struct RSVPWord: Equatable, Sendable {
         case 2...5: return 1
         case 6...9: return 2
         case 10...13: return 3
-        default: return 4
+        // A long word, as "machine-learning", keeps its pivot near its middle rather than at its
+        // fifth letter, so it does not hang off to the right.
+        default: return count * 2 / 5
         }
     }
 

@@ -38,6 +38,10 @@ final class TextProcessorTests: XCTestCase {
         XCTAssertEqual(split.prefix, "re")
         XCTAssertEqual(split.pivot, "a")
         XCTAssertEqual(split.suffix, "ding")
+
+        let long = RSVPWord("machine-learning").splitForDisplay
+        XCTAssertEqual(long.prefix, "machin")
+        XCTAssertEqual(long.pivot, "e")
     }
 
     func testObjectReplacementCharactersAreNotReadableWords() {

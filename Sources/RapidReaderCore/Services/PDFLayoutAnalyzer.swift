@@ -115,6 +115,7 @@ enum PDFLayoutAnalyzer {
                 found.insert(contentsOf: moved, at: index + 1)
             }
         }
+        found = joiningDetachedPowers(found, on: page)
         var respacedTokens = found.map { spacedVariables(in: $0.text) }
         if let pageInk {
             let raised = found.map { raisedTokens(in: $0.text, selection: $0.selection, page: page, ink: pageInk) }
@@ -629,6 +630,14 @@ enum PDFLayoutAnalyzer {
                     if !words[position] || (punctuation && !current.isEmpty) { current.append(position) } else if !current.isEmpty { runs.append(current); current = [] }
                 }
                 if !current.isEmpty { runs.append(current) }
+                // A run of nothing but punctuation, as the "”. -" before an attribution, or a name after
+                // a name, as the "Re" of "Chris Re", is no mathematics.
+                runs.removeAll { run in
+                    run.allSatisfy { tokens[$0].text.allSatisfy { ".,;:-–—”“’'\"!?•·".contains($0) } }
+                        || run.count == 1 && run[0] > 0 && tokens[run[0]].text.range(of: #"^\p{Lu}\p{Ll}{1,12}[.,;:]?$"#, options: .regularExpression) != nil
+                            && tokens[run[0] - 1].text.range(of: #"^\p{Lu}\p{Ll}+$"#, options: .regularExpression) != nil
+                }
+                guard !runs.isEmpty else { continue }
                 let band = row.reduce(CGRect.null) { $0.union(lines[$1].bounds) }
                 let seedLine = lines[start].bounds
                 // Only lines of other rows bound the pictures.
@@ -1912,6 +1921,52 @@ enum PDFLayoutAnalyzer {
     /// PDFKit ends a line after a raised character, so "any integer between 0 and 2³²" and
     /// "− 1. For example, in C++" come as two lines of one row. The rest of the row joins the line
     /// it continues, and the sentence reads as one.
+    /// An exponent PDFKit set apart as a line of its own, as the "20" of "10²⁰" in a sentence of a web
+    /// page, is raised onto its base; a stop PDFKit set apart after it joins too.
+    private static func joiningDetachedPowers(_ found: [(selection: PDFSelection, text: String)], on page: PDFPage) -> [(selection: PDFSelection, text: String)] {
+        let small: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+                                             "+": "⁺", "−": "⁻", "-": "⁻", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "d": "ᵈ", "t": "ᵗ"]
+        var found = found
+        var index = 0
+        while index < found.count {
+            let base = found[index].selection.bounds(for: page)
+            // The base ends a sentence's row, as the "10" after "the condition number of A is".
+            func prose(_ text: String) -> Bool { text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3 }
+            let inSentence = prose(found[index].text) || found.contains { other in
+                let box = other.selection.bounds(for: page)
+                return prose(other.text) && (-1...12).contains(base.minX - box.maxX) && min(box.maxY, base.maxY) - max(box.minY, base.minY) > min(box.height, base.height) * 0.5
+            }
+            guard inSentence, let end = found[index].text.last, end.isNumber || end.isLetter, base.height > 0,
+                  let power = found.indices.first(where: { other in
+                      let box = found[other].selection.bounds(for: page)
+                      let text = found[other].text.trimmingCharacters(in: .whitespaces)
+                      return other != index && (1...4).contains(text.count) && text.allSatisfy { small[$0] != nil }
+                          && (-1...3).contains(box.minX - base.maxX) && box.height <= base.height * 0.85
+                          && box.minY >= base.minY + base.height * 0.3 && box.minY < base.maxY
+                  }) else { index += 1; continue }
+            let box = found[power].selection.bounds(for: page)
+            let selection = found[index].selection.copy() as? PDFSelection ?? found[index].selection
+            selection.add(found[power].selection)
+            var text = found[index].text + String(found[power].text.trimmingCharacters(in: .whitespaces).compactMap { small[$0] })
+            var gone = [power]
+            if let stop = found.indices.first(where: { other in
+                let next = found[other].selection.bounds(for: page)
+                return other != index && other != power && found[other].text.first.map({ ".,;:".contains($0) }) == true
+                    && (-1...3).contains(next.minX - box.maxX) && min(next.maxY, base.maxY) - max(next.minY, base.minY) > min(next.height, base.height) * 0.5
+            }) {
+                selection.add(found[stop].selection)
+                text += found[stop].text
+                gone.append(stop)
+            }
+            found[index] = (selection, text)
+            for removed in gone.sorted(by: >) {
+                found.remove(at: removed)
+                if removed < index { index -= 1 }
+            }
+        }
+        return found
+    }
+
     private static func rejoinRaisedSplits(_ found: inout [(selection: PDFSelection, text: String)], respacedTokens: inout [[String: String]],
                                            raised: [[String: String]], on page: PDFPage) {
         var raised = raised
@@ -2702,6 +2757,12 @@ enum PDFLayoutAnalyzer {
                     let between = CGRect(x: min(a.minX, b.minX), y: min(a.maxY, b.maxY), width: max(a.maxX, b.maxX) - min(a.minX, b.minX), height: max(gap, 0))
                     let proseBetween = lines.contains { $0.block == nil && !isFragment($0.text) && between.contains(CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)) }
                     guard !proseBetween else { continue }
+                    // A display over or under a drawing, mostly clear of it, is a picture of its own;
+                    // labels inside a chart lie within it.
+                    if Set([blocks[first].kind, blocks[second].kind]) == [.formula, .image] {
+                        let formula = blocks[first].kind == .formula ? first : second
+                        if displayOverChart(blocks[formula].rect, members: lines.filter { $0.block == formula }, chart: formula == first ? b : a) { continue }
+                    }
                     if blocks[first].kind != blocks[second].kind {
                         // Code wins, since its shading is what reads as a drawing.
                         let kinds = [blocks[first].kind, blocks[second].kind]
@@ -3491,6 +3552,15 @@ enum PDFLayoutAnalyzer {
     }
 
     /// Two blocks covering much of the same area, such as halves of one algorithm box, become one.
+    /// A display set over or under a chart, as an objective over a plot of its loss: much narrower
+    /// than the chart, centred on it, and written with operators, unlike a chart's own labels.
+    private static func displayOverChart(_ formula: CGRect, members: [Line], chart: CGRect) -> Bool {
+        let operators = members.contains { $0.text.range(of: #"[∥=≤≥≈∑∫−+]|\bmin\b|\bmax\b"#, options: .regularExpression) != nil }
+        let written = members.contains { $0.text.contains(where: \.isLetter) && $0.text.filter { !$0.isWhitespace }.count >= 4 }
+        return members.count >= 3 && operators && written && formula.width <= chart.width * 0.7 && abs(formula.midX - chart.midX) <= chart.width * 0.15
+            && max(0, min(formula.maxY, chart.maxY) - max(formula.minY, chart.minY)) < formula.height * 0.5
+    }
+
     private static func mergeOverlapping(_ blocks: inout [Block], lines: inout [Line]) {
         var merged = true
         while merged {
@@ -3510,7 +3580,11 @@ enum PDFLayoutAnalyzer {
                         && ((gapX < 14 && gapY < -min(first.height, second.height) * 0.5) || (gapY < 14 && gapX < -narrower * 0.5))
                     // Stacked pieces of one box, such as the steps of an algorithm, with no text between.
                     var stacked = false
-                    if gapY >= 0, gapY < 6, gapX < -narrower * 0.5 {
+                    // A display set on a chart, as its objective over a plot of its loss, is no piece of it.
+                    let display = Set([blocks[a].kind, blocks[b].kind]) == [.formula, .image]
+                        && (blocks[a].kind == .formula ? displayOverChart(first, members: lines.filter { $0.block == a }, chart: second)
+                            : displayOverChart(second, members: lines.filter { $0.block == b }, chart: first))
+                    if gapY >= 0, gapY < 6, gapX < -narrower * 0.5, !display {
                         let band = CGRect(x: max(first.minX, second.minX), y: min(first.maxY, second.maxY), width: min(first.maxX, second.maxX) - max(first.minX, second.minX), height: gapY)
                         stacked = !lines.contains { $0.block == nil && !$0.text.isEmpty && $0.bounds.intersects(band.insetBy(dx: 0, dy: -0.5))
                             && $0.bounds.midY > band.minY - 1 && $0.bounds.midY < band.maxY + 1 }
@@ -3649,7 +3723,22 @@ enum PDFLayoutAnalyzer {
     /// Axis labels, legends and table headers sit just outside the drawn part of a figure,
     /// equation numbers beside or below a formula, and split-off pieces beside a line of code.
     private static func attachLabels(to blocks: inout [Block], lines: inout [Line]) {
-        let prose = lines.filter { $0.kind == nil && $0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 4 }.map(\.bounds)
+        var prose = lines.filter { $0.kind == nil && $0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 4 }.map(\.bounds)
+        // A sentence's row goes on through the pieces PDFKit broke it into, as "… of A is" + "10" + "20" + ". Gradient".
+        func onRow(_ line: CGRect, _ bounds: CGRect) -> Bool {
+            min(line.maxY, bounds.maxY) - max(line.minY, bounds.minY) > min(line.height, bounds.height) * 0.3
+                && max(line.minX, bounds.minX) - min(line.maxX, bounds.maxX) < 16
+        }
+        var pieces = lines.filter { $0.block == nil && !$0.text.isEmpty && $0.bounds.height <= typicalLineHeight(lines.map(\.bounds)) * 1.6 }.map(\.bounds)
+        var grown = true
+        while grown {
+            grown = false
+            for (offset, piece) in pieces.enumerated().reversed() where prose.contains(where: { onRow($0, piece) }) {
+                prose.append(piece)
+                pieces.remove(at: offset)
+                grown = true
+            }
+        }
         // Text on a sentence's row, or flush left just under one, belongs to the paragraph:
         // a hat accent PDFKit split off, or the short last line of a paragraph.
         func inParagraph(_ bounds: CGRect) -> Bool {
@@ -3713,6 +3802,20 @@ enum PDFLayoutAnalyzer {
             return !overlap.isNull && overlap.width >= region.width * 0.5 && overlap.height >= min(line.bounds.height, region.height) * 0.5
         }
         if containsProse || insideProseRow { return }
+        // A display set just over or under a chart, as "min E‖W₁W₂x − Ax‖²" over a plot of its loss,
+        // reaches into the chart's ink only with its indices; the chart starts past the display.
+        var region = region
+        for formula in blocks.indices where blocks[formula].kind == .formula && blocks[formula].rect.intersects(region) {
+            let rect = blocks[formula].rect
+            let rest = rect.midY > region.midY ? CGRect(x: region.minX, y: region.minY, width: region.width, height: max(0, rect.minY - region.minY))
+                : CGRect(x: region.minX, y: rect.maxY, width: region.width, height: max(0, region.maxY - rect.maxY))
+            guard rect.height < region.height * 0.4, displayOverChart(rect, members: lines.filter { $0.block == formula }, chart: rest) else { continue }
+            if rect.midY > region.maxY - rect.height, rect.minY - 2 - region.minY >= 30 {
+                region = CGRect(x: region.minX, y: region.minY, width: region.width, height: rect.minY - 2 - region.minY)
+            } else if rect.midY < region.minY + rect.height, region.maxY - rect.maxY - 2 >= 30 {
+                region = CGRect(x: region.minX, y: rect.maxY + 2, width: region.width, height: region.maxY - rect.maxY - 2)
+            }
+        }
         if let overlapping = blocks.indices.first(where: { blocks[$0].rect.intersects(region) }) {
             let rect = blocks[overlapping].rect
             // Labels inside a chart look like formulas; the drawing decides what the region is.
