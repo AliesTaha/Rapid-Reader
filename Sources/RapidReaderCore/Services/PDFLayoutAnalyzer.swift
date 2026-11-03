@@ -227,6 +227,7 @@ enum PDFLayoutAnalyzer {
         attachTableHeaders(&blocks, lines: &lines)
         absorbEnclosedRows(&blocks, lines: &lines)
         settleFigureLabels(&blocks, lines: &lines)
+        gatherOperatorTables(&blocks, lines: &lines)
         // A wordless label lying partly over a drawing, such as a figure's own title, is part of it.
         for index in lines.indices where lines[index].block == nil && lines[index].kind == nil
             && !lines[index].text.split(whereSeparator: \.isWhitespace).contains(where: isWord) && lines[index].text.contains(where: \.isLetter) {
@@ -258,7 +259,7 @@ enum PDFLayoutAnalyzer {
         if blocks.contains(where: { $0.kind == .formula || $0.kind == .code }), let ink = InkMap(page: page, bounds: pageBounds) {
             let sentences = lines.filter { $0.block == nil && ($0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3
                 || $0.text.range(of: #"[A-Za-z]{5,}"#, options: .regularExpression) != nil) }.map(\.bounds)
-            for index in blocks.indices where blocks[index].kind == .formula || blocks[index].kind == .code {
+            for index in blocks.indices where (blocks[index].kind == .formula || blocks[index].kind == .code) && !blocks[index].rect.isNull {
                 // Following the ink must not run along a line of prose.
                 let widened = ink.widened(blocks[index].rect)
                 if !sentences.contains(where: { widened.contains(CGPoint(x: $0.midX, y: $0.midY)) || ($0.intersects(widened) && !$0.intersects(blocks[index].rect)) }) {
@@ -294,7 +295,7 @@ enum PDFLayoutAnalyzer {
                 lines[index].block = listing
             }
         }
-        for (index, block) in blocks.enumerated() {
+        for (index, block) in blocks.enumerated() where !block.rect.isNull {
             // Padding stops short of neighbouring text so no half lines show at the edges.
             var crop = block.rect.insetBy(dx: -6, dy: -6)
             for line in lines where line.block != index {
@@ -2409,6 +2410,50 @@ enum PDFLayoutAnalyzer {
 
     /// A table drawn as rows of figures, as "John 10 15", takes the row of headings just over it,
     /// as "person arrival time leaving time".
+    /// A table of notations, as "intersection a ∩ b a & b" over "union a ∪ b a | b", comes as
+    /// short rows that start at one edge and hold operators, under a heading row such as "set
+    /// syntax bit syntax". PDFKit makes some rows formulas and leaves others as text; the table is
+    /// one picture.
+    private static func gatherOperatorTables(_ blocks: inout [Block], lines: inout [Line]) {
+        let height = typicalLineHeight(lines.map(\.bounds))
+        let body = lines.filter { $0.text.count >= 40 }.map(\.bounds.width).max() ?? 0
+        guard body > 0 else { return }
+        func operators(_ text: String) -> Bool { text.range(of: #"[∩∪¯~&|\\⊕∧∨¬⊆⊂∈]"#, options: .regularExpression) != nil }
+        func free(_ index: Int) -> Bool { lines[index].block == nil || blocks[lines[index].block!].kind == .formula }
+        let order = lines.indices.filter { !lines[$0].text.isEmpty && !lines[$0].small && !lines[$0].heading }.sorted { lines[$0].bounds.maxY > lines[$1].bounds.maxY }
+        var position = 0
+        while position < order.count {
+            let first = order[position]
+            var rows = [first]
+            var next = position + 1
+            while next < order.count, free(order[next]) {
+                let candidate = lines[order[next]].bounds, last = lines[rows.last!].bounds
+                guard last.minY - candidate.maxY < height * 0.8 else { break }
+                rows.append(order[next])
+                next += 1
+            }
+            let starts = rows.filter { abs(lines[$0].bounds.minX - lines[first].bounds.minX) <= 3 }
+            let short = rows.allSatisfy { lines[$0].bounds.width <= body * 0.6 && lines[$0].text.split(whereSeparator: \.isWhitespace).count <= 8 }
+            guard free(first), rows.count >= 3, starts.count >= 3, short, rows.filter({ operators(lines[$0].text) }).count >= 3,
+                  rows.allSatisfy({ lines[$0].text.range(of: #"[.:;?!]$"#, options: .regularExpression) == nil }) else { position += 1; continue }
+            // Each row starts with the name of what it shows, as "union", and the heading row above
+            // names the columns, right of those names.
+            let named = starts.allSatisfy { row in
+                lines[row].text.split(whereSeparator: \.isWhitespace).first.map { $0.count >= 3 && isDictionaryWord(wordLetters($0).lowercased()) } == true
+            }
+            guard named, position > 0, let header = Optional(order[position - 1]), free(header), lines[header].bounds.minY - lines[first].bounds.maxY < height * 0.8,
+                  lines[header].bounds.minX > lines[first].bounds.minX + 10, lines[header].text.range(of: #"[.:;?!]$"#, options: .regularExpression) == nil else { position += 1; continue }
+            let members = [header] + rows
+            let rect = members.reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+            for member in members {
+                if let old = lines[member].block, !lines.indices.contains(where: { $0 != member && !members.contains($0) && lines[$0].block == old }) { blocks[old].rect = .null }
+                lines[member].block = blocks.count
+            }
+            blocks.append(Block(kind: .table, rect: rect, firstLine: members.min()))
+            position = next
+        }
+    }
+
     /// A drawing's labels set in a row under or over it, as "illegal illegal illegal valid" under
     /// four boards or "step 1 step 2 step 3" under three trees, are spread far wider than prose and
     /// belong to it; a heading that the drawing's box reached, as "Method 2", does not.
