@@ -454,7 +454,14 @@ public enum PDFTextExtractor {
             return cleaned
         }
         droppingMarginContents(&kept)
+        let listed = kept
         kept = kept.map(tidyingListings)
+        // The last page of a contents, as one entry "Alphabetical Index 93" left over, is the contents too.
+        for page in kept.indices.dropFirst() where !listed[page - 1].isEmpty && kept[page - 1].allSatisfy(PDFLayoutAnalyzer.isMarker)
+            && !kept[page].isEmpty && kept[page].count < 8 && kept[page].allSatisfy({ line in
+                line.range(of: #"^\P{L}*\p{Lu}.*\D\s\d{1,3}$"#, options: .regularExpression) != nil || PDFLayoutAnalyzer.isMarker(line) }) {
+            kept[page] = kept[page].filter(PDFLayoutAnalyzer.isMarker)
+        }
         kept = kept.map(joiningNoteTails)
         kept = kept.map(raisingFootnoteMarks)
         movingNotes(&kept)
@@ -656,6 +663,17 @@ public enum PDFTextExtractor {
     static func tidyingListings(_ page: [String]) -> [String] {
         let mark = PDFLayoutAnalyzer.smallPrint
         func plain(_ line: String) -> String { line.hasPrefix(mark) ? String(line.dropFirst(mark.count)) : line }
+        // An entry whose page number PDFKit listed on the next line, as "1.5 Mathematics" + "10", is
+        // numbered too; that number counts once.
+        func entries(_ lines: [String]) -> Int {
+            var count = 0, index = 0
+            while index < lines.count {
+                let next = index + 1 < lines.count && plain(lines[index + 1]).range(of: #"^\d{1,3}$"#, options: .regularExpression) != nil
+                if plain(lines[index]).range(of: #"\s\d{1,3}$|^\d{1,3}$|\s[ivxl]{1,6}$"#, options: .regularExpression) != nil || next { count += next ? 2 : 1 }
+                index += next ? 2 : 1
+            }
+            return count
+        }
         var lines: [String] = []
         for line in page {
             if let last = lines.last, plain(last).range(of: #"^\[\d{1,3}\]$"#, options: .regularExpression) != nil, !PDFLayoutAnalyzer.isMarker(line) {
@@ -667,8 +685,8 @@ public enum PDFTextExtractor {
         let numbered = lines.filter { plain($0).range(of: #"^\d{1,3}$|\s\d{1,3}$|(\s?\.){3,}\s*\d{1,3}$"#, options: .regularExpression) != nil }.count
         guard numbered >= 8, numbered * 10 >= lines.count * 4 else { return lines }
         // A contents page is a map of the book, not text to read; its pictures, if any, stay.
-        if lines.contains(where: { plain($0).range(of: #"^(Contents|Table of Contents|CONTENTS)$"#, options: .regularExpression) != nil })
-            || numbered * 10 >= lines.count * 6 {
+        if lines.contains(where: { plain($0).range(of: #"^[^\p{L}]*(Contents|Table of Contents|CONTENTS)$"#, options: .regularExpression) != nil })
+            || numbered * 10 >= lines.count * 6 || entries(lines) * 10 >= lines.count * 8 {
             return lines.filter { PDFLayoutAnalyzer.isMarker($0) }
         }
         return lines.filter { plain($0).range(of: #"^\d{1,3}$"#, options: .regularExpression) == nil }

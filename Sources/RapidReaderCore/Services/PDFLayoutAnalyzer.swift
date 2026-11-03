@@ -142,6 +142,8 @@ enum PDFLayoutAnalyzer {
             rejoinRaisedSplits(&found, respacedTokens: &respacedTokens, raised: raised, on: page)
             rewriteStackedPairs(&found, respacedTokens: &respacedTokens, on: page, ink: pageInk)
         }
+        // After the rewrites, which read each piece against its own characters.
+        joinDetachedIndices(&found, respacedTokens: &respacedTokens, on: page)
         var lines: [Line] = found.map { selection, text in
             // Table-of-contents entries end in dot leaders and are prose, whatever else they hold.
             let leaders = text.range(of: #"(\. ?){4,}"#, options: .regularExpression) != nil
@@ -2143,6 +2145,42 @@ enum PDFLayoutAnalyzer {
 
     /// An exponent PDFKit set apart as a line of its own, as the "20" of "10²⁰" in a sentence of a web
     /// page, is raised onto its base; a stop PDFKit set apart after it joins too.
+    /// An index PDFKit set at the start of the next piece of the row, as the "1" of "p′" + "1 = (1,−1)",
+    /// is lowered onto its name.
+    private static func joinDetachedIndices(_ found: inout [(selection: PDFSelection, text: String)], respacedTokens: inout [[String: String]], on page: PDFPage) {
+        let small: [Character: Character] = ["0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉"]
+        // Character bounds can sit off where a glyph is drawn; a one-character selection does not.
+        func box(_ at: Int) -> CGRect { page.selection(for: NSRange(location: at, length: 1))?.bounds(for: page) ?? .null }
+        for index in found.indices where !found[index].text.isEmpty {
+            // A joined piece can end in a name of its own, as "1 = (x′" after "p′".
+            var tail = found[index].selection
+            joining: while found[index].text.hasSuffix("′"), tail.numberOfTextRanges(on: page) == 1 {
+                let own = tail.range(at: 0, on: page)
+                guard own.length > 0 else { break }
+                let prime = box(NSMaxRange(own) - 1)
+                for other in found.indices where other != index && !found[other].text.isEmpty && found[other].selection.numberOfTextRanges(on: page) == 1 {
+                    guard let digit = found[other].text.first, small[digit] != nil else { continue }
+                    let range = found[other].selection.range(at: 0, on: page)
+                    let first = box(range.location)
+                    // Just after the name on its row, and followed by a relation or a comma, as an index is.
+                    guard (-3...4).contains(first.minX - prime.maxX), first.midY > prime.minY, first.midY < prime.maxY,
+                          found[other].text.dropFirst().first.map({ " =,)".contains($0) }) ?? true else { continue }
+                    let rest = String(found[other].text.dropFirst())
+                    found[index].text += String(small[digit]!) + rest
+                    found[other].text = ""
+                    respacedTokens[index].merge(respacedTokens[other]) { first, _ in first }
+                    tail = found[other].selection
+                    continue joining
+                }
+                break
+            }
+        }
+        for index in found.indices.reversed() where found[index].text.isEmpty {
+            found.remove(at: index)
+            respacedTokens.remove(at: index)
+        }
+    }
+
     private static func joiningDetachedPowers(_ found: [(selection: PDFSelection, text: String)], on page: PDFPage) -> [(selection: PDFSelection, text: String)] {
         let small: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
                                              "+": "⁺", "−": "⁻", "-": "⁻", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "d": "ᵈ", "t": "ᵗ"]
@@ -2289,9 +2327,17 @@ enum PDFLayoutAnalyzer {
         let bodies = glyphs.filter { $0.top - $0.bottom >= tall * 0.6 }.map(\.bottom).sorted()
         guard !bodies.isEmpty, tall > 0 else { return false }
         let baseline = bodies[bodies.count / 2]
+        // Tall glyphs that descend, as an italic "f" and parentheses, reach the foot of the box; a
+        // letter is raised only above the letters that sit on the line, away from it. A descender,
+        // as of "g", still sits on the line, not low.
+        let seated = glyphs.filter { $0.bottom > rect.minY + 1 && $0.top - $0.bottom >= tall * 0.3 }.map(\.bottom).sorted()
+        let floor = baseline < rect.minY + 1 && seated.count >= 2 ? seated[seated.count / 2] : baseline
+        let last = glyphs.max { $0.span.upperBound < $1.span.upperBound }?.span
         return !glyphs.contains { glyph in
             let height = glyph.top - glyph.bottom
-            let raised = glyph.bottom > baseline + tall * 0.3 && height > tall * 0.25
+            // A comma or full stop after the expression hangs low and narrow; it is no index.
+            if glyph.span == last, glyph.span.upperBound - glyph.span.lowerBound < tall * 0.3, glyph.top < baseline + tall * 0.5 { return false }
+            let raised = glyph.bottom > floor + tall * 0.3 && height > tall * 0.25
             let lowered = height >= tall * 0.4 && height < tall * 0.8 && glyph.bottom < baseline - tall * 0.12 && glyph.top < baseline + tall * 0.6
             return raised || lowered
         }
