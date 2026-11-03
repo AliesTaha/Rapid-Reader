@@ -295,10 +295,20 @@ enum PDFLayoutAnalyzer {
                 let goesOn = previous.map { $0.block == nil && $0.text.range(of: #"[.!?:]["”’)]?$"#, options: .regularExpression) == nil } ?? false
                     || following.map { $0.block == nil && $0.text.first?.isLowercase == true } ?? false
                 guard (2...6).contains(tokens.count), tokens.allSatisfy({ $0.allSatisfy { $0.isASCII && $0.isLetter } }), tokens[0].first?.isUppercase == true, !goesOn,
-                      bounds.width < width * 0.85,
-                      let image = blocks.indices.first(where: { blocks[$0].kind == .image && !blocks[$0].rect.isNull
-                          && blocks[$0].rect.minY - bounds.maxY >= -1 && blocks[$0].rect.minY - bounds.maxY < height * 1.6
-                          && bounds.minX >= blocks[$0].rect.minX - 10 && bounds.maxX <= blocks[$0].rect.maxX + 10 }) else { continue }
+                      bounds.width < width * 0.85 else { continue }
+                // It can run under two drawings side by side, as "Euclidean distance   Manhattan distance".
+                let above = blocks.indices.filter { blocks[$0].kind == .image && !blocks[$0].rect.isNull
+                    && blocks[$0].rect.minY - bounds.maxY >= -1 && blocks[$0].rect.minY - bounds.maxY < height * 1.6
+                    && blocks[$0].rect.maxX > bounds.minX && blocks[$0].rect.minX < bounds.maxX }
+                let span = above.reduce(CGRect.null) { $0.union(blocks[$1].rect) }
+                guard let image = above.min(), bounds.minX >= span.minX - 10, bounds.maxX <= span.maxX + 10 else { continue }
+                for other in above where other != image {
+                    for member in lines.indices where lines[member].block == other { lines[member].block = image }
+                    blocks[image].rect = blocks[image].rect.union(blocks[other].rect)
+                    blocks[image].firstLine = [blocks[image].firstLine, blocks[other].firstLine].compactMap { $0 }.min()
+                    blocks[other].rect = .null
+                    blocks[other].firstLine = nil
+                }
                 lines[index].block = image
                 blocks[image].rect = blocks[image].rect.union(bounds)
             }
@@ -550,10 +560,11 @@ enum PDFLayoutAnalyzer {
                 while steps < 16, free(CGRect(x: crop.maxX, y: crop.minY + 1, width: 0.5, height: max(0, crop.height - 2))) { crop.size.width += 0.5; steps += 1 }
                 steps = 0
                 while steps < 16, free(CGRect(x: crop.minX - 0.5, y: crop.minY + 1, width: 0.5, height: max(0, crop.height - 2))) { crop.origin.x -= 0.5; crop.size.width += 0.5; steps += 1 }
+                // Up and down only for a drawing; a display's edge there can meet a listing's frame.
                 steps = 0
-                while steps < 16, free(CGRect(x: crop.minX + 1, y: crop.minY - 0.5, width: max(0, crop.width - 2), height: 0.5)) { crop.origin.y -= 0.5; crop.size.height += 0.5; steps += 1 }
+                while block.kind == .image, steps < 16, free(CGRect(x: crop.minX + 1, y: crop.minY - 0.5, width: max(0, crop.width - 2), height: 0.5)) { crop.origin.y -= 0.5; crop.size.height += 0.5; steps += 1 }
                 steps = 0
-                while steps < 16, free(CGRect(x: crop.minX + 1, y: crop.maxY, width: max(0, crop.width - 2), height: 0.5)) { crop.size.height += 0.5; steps += 1 }
+                while block.kind == .image, steps < 16, free(CGRect(x: crop.minX + 1, y: crop.maxY, width: max(0, crop.width - 2), height: 0.5)) { crop.size.height += 0.5; steps += 1 }
             }
             // A rule the crop took in at its edge, as the separator of the footnotes under a
             // display, is no part of the formula; it is left out and the crop closes on the rest.
@@ -981,6 +992,9 @@ enum PDFLayoutAnalyzer {
                 if expression.atEnd, index + 1 < lines.count, let rest = lines[index + 1].text.firstMatch(of: /^\s*([^\s()]{1,6}\))/) {
                     whole += " " + rest.output.1
                 }
+                // A relation after a name the sentence spells out, as "if coins = {1,3,4}", reads on from it.
+                let afterName = line[..<range.lowerBound].range(of: #"\p{L}{2,}\s$"#, options: .regularExpression) != nil
+                if afterName, whole.range(of: #"^\s*[=<>≤≥≈]"#, options: .regularExpression) != nil { whole = "x " + whole }
                 if chain == nil, apart, rect.height <= usualHeight * 1.35, isPlainMath(whole),
                    let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
                 // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first

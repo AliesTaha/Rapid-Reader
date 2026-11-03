@@ -576,6 +576,12 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<![\p{L}])log([a-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
                 .replacingOccurrences(of: #"·\s?·\s?·(\s(?=[)\]}]))?"#, with: "⋯", options: .regularExpression)
+                // A power between two names, as the "2ᵏ" of "O(n2ᵏk)", stands apart from them.
+                .replacingOccurrences(of: #"(?<=[A-Za-z])(\d+[⁰¹²³⁴⁵⁶⁷⁸⁹ⁿᵏᵐⁱˣ]+)(?=[A-Za-z])"#, with: " $1 ", options: .regularExpression)
+                // A sign set against the word after it, as "s =HATTIVATTI", stands apart.
+                .replacingOccurrences(of: #"(?<=\s)=(?=\p{L}{2,})"#, with: "= ", options: .regularExpression)
+                // A product of figures takes no space after its dot, as "2.4·10¹⁸".
+                .replacingOccurrences(of: #"(?<=\d)·\s(?=\d)"#, with: "·", options: .regularExpression)
                 // A negation sign PDFKit set against the word before, as "are¬ (negation)", stands apart.
                 .replacingOccurrences(of: #"(?<=\p{L}[,;]?)¬"#, with: " ¬", options: .regularExpression)
                 // A web address broken after a slash or a dot goes on without a space.
