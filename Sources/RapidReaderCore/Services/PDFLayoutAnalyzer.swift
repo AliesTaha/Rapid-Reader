@@ -997,7 +997,8 @@ enum PDFLayoutAnalyzer {
                 // A relation after a name the sentence spells out, as "if coins = {1,3,4}", reads on from it.
                 let afterName = line[..<range.lowerBound].range(of: #"\p{L}{2,}\s$"#, options: .regularExpression) != nil
                 if afterName, whole.range(of: #"^\s*[=<>≤≥≈]"#, options: .regularExpression) != nil { whole = "x " + whole }
-                if chain == nil, apart, rect.height <= usualHeight * 1.35, isPlainMath(whole),
+                // Braces stretch a box as far as its line's, as on "if coins = {1,3,4}".
+                if chain == nil, apart, rect.height <= max(usualHeight * 1.35, lines[index].bounds.height + 0.5), isPlainMath(whole),
                    let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
                 // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first
                 // blank row, a little way at most.
@@ -1029,6 +1030,40 @@ enum PDFLayoutAnalyzer {
                         let others = foreign(CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: grown.maxY - rect.maxY))
                         let strip = CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: grown.maxY - rect.maxY)
                         if ink.blankRow(above: true, of: grown), others.isEmpty, strip.height > 0 { rect = grown }
+                    }
+                    // A shape that rises from the expression past its box, as a root's bar or a raised
+                    // "6" under the line above, is its own and is taken whole; one that comes down from
+                    // the line above, reaching the top of the area searched, is not.
+                    // A root's sign, drawn and not written, as of "√2ⁿ", reaches past the characters' box
+                    // to the left, as wide as much of the expression, as no neighbouring letter is.
+                    let side = usualHeight, foot = usualHeight * 0.25
+                    let area = CGRect(x: rect.minX - side, y: rect.minY - foot, width: rect.width + side * 2, height: rect.height + foot + usualHeight * 0.4)
+                    if let shapes = ink.finer(page)?.glyphs(in: area, stacking: false) {
+                        let inside = { (shape: (span: Range<CGFloat>, bottom: CGFloat, top: CGFloat)) in
+                            shape.span.lowerBound > area.minX + 0.5 && shape.span.upperBound < area.maxX - 0.5 && shape.bottom > area.minY + 0.5 && shape.top < area.maxY - 0.5
+                        }
+                        let rising = shapes.filter { shape in
+                            inside(shape) && shape.bottom < rect.maxY - 1 && shape.top > rect.maxY + 0.25
+                                && shape.span.upperBound > rect.minX + 0.5 && shape.span.lowerBound < rect.maxX - 0.5
+                        }
+                        let crossing = shapes.filter { shape in
+                            inside(shape) && min(shape.span.upperBound, rect.maxX) - max(shape.span.lowerBound, rect.minX) >= rect.width * 0.5
+                                && (shape.span.lowerBound < rect.minX - 0.5 || shape.span.upperBound > rect.maxX + 0.5) && shape.bottom < rect.maxY && shape.top > rect.minY
+                        }
+                        let falling = shapes.filter { $0.top >= area.maxY - 0.5 && $0.span.upperBound > rect.minX && $0.span.lowerBound < rect.maxX }.map(\.bottom)
+                        let own = rising + crossing
+                        if !own.isEmpty {
+                            let top = min(max(rect.maxY, (own.map(\.top).max() ?? rect.maxY) + 0.5), (falling.min() ?? .infinity) - 0.25)
+                            let bottom = min(rect.minY, (crossing.map(\.bottom).min() ?? rect.minY) - 0.5)
+                            let left = min(rect.minX, (own.map(\.span.lowerBound).min() ?? rect.minX) - 0.5)
+                            let right = max(rect.maxX, (own.map(\.span.upperBound).max() ?? rect.maxX) + 0.5)
+                            if top > rect.maxY || bottom < rect.minY || left < rect.minX || right > rect.maxX {
+                                // Its foot stays at its ink, as a box set lower than its glyphs would leave blank.
+                                let low = shapes.filter { $0.span.upperBound > left && $0.span.lowerBound < right && $0.top > rect.minY && $0.bottom < max(top, rect.maxY) }.map(\.bottom).min()
+                                let foot = max(bottom, min(rect.maxY - 1, (low ?? bottom) - 0.75))
+                                rect = CGRect(x: left, y: foot, width: right - left, height: max(top, rect.maxY) - foot)
+                            }
+                        }
                     }
                 }
                 inlines.append(Inline(line: index, range: expression.range, rect: rect, text: chain?.text ?? String(lines[index].text[expression.range]),
