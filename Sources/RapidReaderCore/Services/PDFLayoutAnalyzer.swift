@@ -448,7 +448,20 @@ enum PDFLayoutAnalyzer {
                 if line.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3, bounds.intersects(crop),
                    min(line.bounds.maxX, crop.maxX) - max(line.bounds.minX, crop.minX) > 8 {
                     if line.bounds.midY > block.rect.maxY {
-                        let top = max(min(crop.maxY, bounds.minY - 0.5), block.rect.maxY - 2)
+                        var top = max(min(crop.maxY, bounds.minY - 0.5), block.rect.maxY - 2)
+                        // Its box can reach below its letters, over a display's bar or the tops of its
+                        // figures, as over "Ā = {3,4,6}"; the letters themselves, above the display's
+                        // own lines, are the limit then.
+                        let rest = lines.filter { $0.bounds != line.bounds && !$0.text.isEmpty }.map(\.bounds)
+                        let above = CGRect(x: crop.minX, y: line.bounds.minY, width: crop.width, height: line.bounds.height)
+                        // The edge moves only where it cuts the display's ink, and only to the first blank row.
+                        if let pageInk, top < crop.maxY, let letters = pageInk.inkBounds(in: above, excluding: rest),
+                           letters.minY > top + 0.5 {
+                            let limit = min(crop.maxY, letters.minY - 0.5)
+                            var edge = top
+                            while edge < limit, pageInk.inked(CGRect(x: crop.minX, y: edge - 0.25, width: crop.width, height: 0.5)) { edge += 0.5 }
+                            top = min(limit, edge)
+                        }
                         crop.size.height = max(0, top - crop.minY)
                         continue
                     }
