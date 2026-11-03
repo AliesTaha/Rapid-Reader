@@ -447,6 +447,7 @@ public enum PDFTextExtractor {
         kept = kept.map(raisingFootnoteMarks)
         movingNotes(&kept)
         keepingNotesInSection(&kept)
+        droppingNoteMarks(&kept)
         movingPageTopCaptions(&kept)
         return kept.map { page in
             // The last item of a list ends where a sentence follows it, as in "…whose
@@ -667,6 +668,26 @@ public enum PDFTextExtractor {
     /// A footnote's number that PDFKit set level with the text, as "algorithm1" over a small
     /// note "1The algorithm was …", is raised after a word, never after a name such as "x1":
     /// "algorithm¹" and "¹ The algorithm was …".
+    /// A note is read after its sentence and starts with its own mark, so the mark after the word,
+    /// as the "³" of "time³", would only read as a power; it is dropped.
+    static func droppingNoteMarks(_ pages: inout [[String]]) {
+        let small = PDFLayoutAnalyzer.smallPrint
+        let numbers: [Set<String>] = pages.map { page in
+            Set(page.filter { $0.hasPrefix(small) }.compactMap { line in
+                line.dropFirst(small.count).firstMatch(of: /^([⁰¹²³⁴⁵⁶⁷⁸⁹]{1,2})\s/).map { String($0.output.1) }
+            })
+        }
+        for page in pages.indices {
+            let marks = numbers[page].union(page > 0 ? numbers[page - 1] : []).union(page + 1 < pages.count ? numbers[page + 1] : [])
+            guard !marks.isEmpty else { continue }
+            for index in pages[page].indices where !pages[page][index].hasPrefix(small) && !PDFLayoutAnalyzer.isMarker(pages[page][index]) {
+                for mark in marks {
+                    pages[page][index] = pages[page][index].replacingOccurrences(of: #"(?<=\p{L}\p{Ll}{2}[.,:;)”’]{0,1})"# + mark + #"(?=[.,:;)]?(\s|$))"#, with: "", options: .regularExpression)
+                }
+            }
+        }
+    }
+
     static func raisingFootnoteMarks(_ page: [String]) -> [String] {
         let mark = PDFLayoutAnalyzer.smallPrint
         let raised: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹"]
