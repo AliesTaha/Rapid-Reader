@@ -338,8 +338,11 @@ public enum PDFTextExtractor {
             guard let whole = Range(match.range, in: result), let first = Range(match.range(at: 1), in: result),
                   let second = Range(match.range(at: 2), in: result) else { continue }
             let head = String(result[first]), tail = String(result[second])
-            let closed = WordSplitter.isWord(head + tail)
             let compound = WordSplitter.isWord(head) && WordSplitter.isWord(tail)
+            // A compound the page writes with a hyphen elsewhere, as "pre-order" beside "post-" +
+            // "order", keeps it.
+            let sibling = compound && text.range(of: #"\p{L}-"# + NSRegularExpression.escapedPattern(for: tail) + #"\b"#, options: .regularExpression) != nil
+            let closed = WordSplitter.isWord(head + tail) && !sibling
             // A rejoined word can still hide a missing space, as in "nonran-" + "domizedstudies".
             let rejoined = closed || head.count + tail.count < 12 ? head + tail : WordSplitter.split(head + tail)
             // A compound that goes on, as "English-" + "to-German", keeps its words together.
@@ -484,7 +487,7 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<![\p{L}])([a-z])log(?= [a-z]\b)"#, with: "$1 log", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<![\p{L}])log([a-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
-                .replacingOccurrences(of: #"·\s?·\s?·"#, with: "⋯", options: .regularExpression)
+                .replacingOccurrences(of: #"·\s?·\s?·(\s(?=[)\]}]))?"#, with: "⋯", options: .regularExpression)
                 // A web address broken after a slash or a dot goes on without a space.
                 .replacingOccurrences(of: #"(https?://\S*[/.])\n(?=\w)"#, with: "$1", options: .regularExpression)
                 // A range of pages broken after its dash, as "321–" + "322", is one.
@@ -545,7 +548,8 @@ public enum PDFTextExtractor {
         let numbered = lines.filter { plain($0).range(of: #"^\d{1,3}$|\s\d{1,3}$|(\s?\.){3,}\s*\d{1,3}$"#, options: .regularExpression) != nil }.count
         guard numbered >= 8, numbered * 10 >= lines.count * 4 else { return lines }
         return lines.filter { plain($0).range(of: #"^\d{1,3}$"#, options: .regularExpression) == nil }
-            .map { $0.replacingOccurrences(of: #"(\s?\.){3,}\s*\d{1,3}$|(?<=\D)\s+\d{1,3}$"#, with: "", options: .regularExpression) }
+            // Front matter is numbered in roman figures, as "Preface ix".
+            .map { $0.replacingOccurrences(of: #"(\s?\.){3,}\s*\d{1,3}$|(?<=\D)\s+\d{1,3}$|(?<=\p{L})\s+[ivxl]{1,6}$"#, with: "", options: .regularExpression) }
     }
 
     /// A chapter's contents set small in the margin, as "1.1 Simpson’s Paradox 1" + "1.2

@@ -60,6 +60,7 @@ enum PDFLayoutAnalyzer {
         respaceRunTogetherLines(&found, on: page, bounds: pageBounds)
         let pageInk = InkMap(page: page, bounds: pageBounds)
         if let pageInk { found = visibleLines(found, on: page, ink: pageInk) }
+        found = splittingAtJoiningWords(found, on: page)
         // Some PDFs list a page's lines from the bottom up; reading goes from the top down.
         let centres = found.map { $0.selection.bounds(for: page) }
         let steps = zip(centres, centres.dropFirst()).filter { min($0.maxX, $1.maxX) > max($0.minX, $1.minX) }
@@ -236,7 +237,6 @@ enum PDFLayoutAnalyzer {
         attachTableHeaders(&blocks, lines: &lines)
         absorbEnclosedRows(&blocks, lines: &lines)
         settleFigureLabels(&blocks, lines: &lines)
-        releaseLeadIns(&blocks, lines: &lines)
         // A word of the sentence that a formula follows, as the "is" before "|(2·5 − 5·4) + …|", is read.
         for index in lines.indices where lines[index].block.map({ blocks[$0].kind == .formula }) == true
             && lines[index].text.range(of: #"^(is|are|where|and|or|then|so|as|gives|equals)$"#, options: .regularExpression) != nil {
@@ -246,8 +246,41 @@ enum PDFLayoutAnalyzer {
             let rest = lines.filter { $0.block == block }.reduce(CGRect.null) { $0.union($1.bounds) }
             if !rest.isNull { blocks[block].rect = rest }
         }
+        releaseLeadIns(&blocks, lines: &lines)
         mergeFormulaColumns(&blocks, lines: &lines)
         gatherOperatorTables(&blocks, lines: &lines)
+        // The rest of a display's row that PDFKit set apart, as ",2nm,n² + m²)," after "(n² − m²", is
+        // the display's, where it touches it and holds no word.
+        for index in lines.indices where lines[index].block == nil && !lines[index].text.isEmpty && !lines[index].heading
+            && !lines[index].text.split(whereSeparator: \.isWhitespace).contains(where: { token in
+                let letters = wordLetters(token).lowercased()
+                return token.count >= 3 && letters.allSatisfy(\.isASCII) && isDictionaryWord(letters) && !mathWords.contains(letters)
+            }) {
+            let bounds = lines[index].bounds
+            guard let block = blocks.indices.first(where: { block in
+                let rect = blocks[block].rect
+                guard blocks[block].kind == .formula, !rect.isNull else { return false }
+                let gap = bounds.minX >= rect.midX ? bounds.minX - rect.maxX : rect.minX - bounds.maxX
+                // Or lies inside it, as a row of a derivation PDFKit left out.
+                return gap >= -1 && gap <= 3 && min(bounds.maxY, rect.maxY) - max(bounds.minY, rect.minY) >= min(bounds.height, rect.height) * 0.6
+                    || rect.insetBy(dx: 2, dy: 2).contains(CGPoint(x: bounds.midX, y: bounds.midY)) && rect.contains(bounds.insetBy(dx: 1, dy: 1))
+            }) else { continue }
+            lines[index].block = block
+            lines[index].kind = .formula
+            blocks[block].rect = blocks[block].rect.union(bounds)
+        }
+        // A label set small under a display, as the "k times" under a brace, is the display's.
+        for index in lines.indices where lines[index].block == nil && lines[index].small && !lines[index].text.isEmpty
+            && (1...3).contains(lines[index].text.split(whereSeparator: \.isWhitespace).count) && lines[index].text.count <= 14 {
+            let bounds = lines[index].bounds
+            guard let block = blocks.indices.first(where: { block in
+                let rect = blocks[block].rect
+                return blocks[block].kind == .formula && !rect.isNull && bounds.minX >= rect.minX && bounds.maxX <= rect.maxX
+                    && rect.minY - bounds.maxY >= -2 && rect.minY - bounds.maxY <= 2
+            }) else { continue }
+            lines[index].block = block
+            blocks[block].rect = blocks[block].rect.union(bounds)
+        }
         // A wordless label lying partly over a drawing, such as a figure's own title, is part of it.
         for index in lines.indices where lines[index].block == nil && lines[index].kind == nil
             && !lines[index].text.split(whereSeparator: \.isWhitespace).contains(where: isWord) && lines[index].text.contains(where: \.isLetter) {
@@ -271,6 +304,7 @@ enum PDFLayoutAnalyzer {
             else if caption.midY > rest.maxY { rect.size.height = min(rect.maxY, caption.minY - 1) - rect.minY }
             if rect.height > 4 { blocks[block].rect = rect }
         }
+        if ProcessInfo.processInfo.environment["RR_LINES"] != nil { for (i, l) in lines.enumerated() { FileHandle.standardError.write("LINE \(i) k=\(l.kind.map { "\($0)" } ?? "-") b=\(l.block.map(String.init) ?? "-") [\(Int(l.bounds.minX)),\(Int(l.bounds.minY)) \(Int(l.bounds.width))x\(Int(l.bounds.height))] \(l.text)\n".data(using: .utf8)!) }; for (i, b) in blocks.enumerated() { FileHandle.standardError.write("BLOCK \(i) \(b.kind) \(b.rect)\n".data(using: .utf8)!) } }
         var figures: [PageFigure] = []
         var markersBefore: [Int: [Int]] = [:]
         var figureRects: [Int: CGRect] = [:]
@@ -470,6 +504,20 @@ enum PDFLayoutAnalyzer {
                 if below > position, !between.isEmpty, between.allSatisfy({ lines[$0].bounds.minY > block.rect.midY }) {
                     position = below
                 }
+            }
+            // An exponent PDFKit listed before the sentence above it, as the "0" of a matrix power, or
+            // a sentence's last word it listed after the footnotes, as "formula", puts the picture
+            // too early: it goes after the lines that stand above it.
+            if block.kind == .formula || block.kind == .image {
+                var next = position, after = position
+                while next < lines.count {
+                    let line = lines[next]
+                    if line.block != nil || line.text.isEmpty || line.small { next += 1; continue }
+                    guard line.bounds.midY > block.rect.maxY - 1, line.bounds.minY - block.rect.maxY < lineHeight * 2.5 || next == after else { break }
+                    next += 1
+                    after = next
+                }
+                if after > position { position = after }
             }
             markersBefore[position, default: []].append(firstFigureNumber + figures.count)
             figureRects[firstFigureNumber + figures.count] = block.rect
@@ -1805,8 +1853,19 @@ enum PDFLayoutAnalyzer {
                 before.size.width = typeset
             }
             guard after.minX - before.maxX >= size * 0.45 else { continue }
-            let gap = CGRect(x: before.maxX + 0.4, y: baseline - size * 0.35, width: after.minX - before.maxX - 0.8, height: size * 1.25)
-            let runs = ink.glyphColumns(in: gap)
+            var gap = CGRect(x: before.maxX + 0.4, y: baseline - size * 0.35, width: after.minX - before.maxX - 0.8, height: size * 1.25)
+            var runs = ink.glyphColumns(in: gap)
+            // Ink running on from the token before, as the "l(" of "total(" past a box set short,
+            // is that token's; so is ink running into the next.
+            var reach = gap.minX
+            while let first = runs.first, first.lowerBound - reach <= 1.5, runs.count > 1 { reach = first.upperBound; runs.removeFirst() }
+            var back = gap.maxX
+            while let last = runs.last, back - last.upperBound <= 1.5, runs.count > 1 { back = last.lowerBound; runs.removeLast() }
+            // A lone run against the token before, as the "t" of "left", is that token's.
+            if runs.count == 1, let only = runs.first, only.lowerBound - gap.minX <= 1, line[previous].last.map({ "([{".contains($0) }) != true { continue }
+            if let first = runs.first, let last = runs.last, first.lowerBound > gap.minX + 0.5 || last.upperBound < gap.maxX - 0.5 {
+                gap = CGRect(x: first.lowerBound - 0.4, y: gap.minY, width: last.upperBound - first.lowerBound + 0.8, height: gap.height)
+            }
             guard !runs.isEmpty else { continue }
             func extent(_ run: Range<CGFloat>) -> (low: CGFloat, high: CGFloat)? {
                 let column = CGRect(x: run.lowerBound, y: gap.minY, width: run.upperBound - run.lowerBound, height: gap.height)
@@ -1897,6 +1956,44 @@ enum PDFLayoutAnalyzer {
     /// comes as two pieces of one row: the line ends on the top, "…total of 2n", and the next piece
     /// starts with the bottom, "n ways…", set under it; the top's piece holds a word of the sentence. Tall brackets beside them make a binomial,
     /// "C(2n, n)"; a bar between them a fraction, "1/2".
+    /// A word that joins two displays on one row, as the "and" between two matrix products, can
+    /// share a PDFKit line with a piece of the display after it; the word is read on its own.
+    private static func splittingAtJoiningWords(_ found: [(selection: PDFSelection, text: String)], on page: PDFPage) -> [(selection: PDFSelection, text: String)] {
+        found.flatMap { entry -> [(selection: PDFSelection, text: String)] in
+            let (selection, text) = entry
+            guard let match = text.firstMatch(of: /\b(and|or)\b/), selection.numberOfTextRanges(on: page) == 1,
+                  let raw = selection.string, raw == text || raw.trimmingCharacters(in: .whitespacesAndNewlines) == text.trimmingCharacters(in: .whitespacesAndNewlines) else { return [entry] }
+            // Only mathematics around it, figures and names, with wide spaces either side.
+            let rest = text[..<match.range.lowerBound] + " " + text[match.range.upperBound...]
+            // A display that reads as text, as "4 ∈ X and 5 ∉ X.", stays whole; pieces of matrices hold figures alone.
+            guard rest.split(whereSeparator: \.isWhitespace).allSatisfy({ $0.count <= 3 }), !rest.contains(where: \.isLetter),
+                  rest.contains(where: \.isNumber) else { return [entry] }
+            let range = selection.range(at: 0, on: page)
+            guard range.location != NSNotFound else { return [entry] }
+            let offset = (raw as NSString).range(of: text.trimmingCharacters(in: .whitespacesAndNewlines)).location
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard offset != NSNotFound, let local = trimmed.firstMatch(of: /\b(and|or)\b/)?.range else { return [entry] }
+            let word = NSRange(local, in: trimmed)
+            func piece(_ from: Int, _ to: Int) -> (selection: PDFSelection, text: String)? {
+                let part = (trimmed as NSString).substring(with: NSRange(location: from, length: to - from))
+                let content = part.trimmingCharacters(in: .whitespaces)
+                guard !content.isEmpty, let lead = part.firstIndex(where: { !$0.isWhitespace }) else { return nil }
+                let start = from + (part[..<lead] as Substring).utf16.count
+                guard let sub = page.selection(for: NSRange(location: range.location + offset + start, length: (content as NSString).length)),
+                      (sub.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == content else { return nil }
+                return (sub, content)
+            }
+            let pieces = [piece(0, word.location), piece(word.location, NSMaxRange(word)), piece(NSMaxRange(word), (trimmed as NSString).length)]
+            let parts = pieces.compactMap { $0 }
+            // The word stands clear of the pieces beside it.
+            guard parts.count >= 2, pieces[1] != nil, let size = selection.attributedString.flatMap({ $0.length > 0 ? ($0.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize : nil }) else { return [entry] }
+            let boxes = parts.map { $0.selection.bounds(for: page) }
+            let middle = pieces[0] == nil ? 0 : 1
+            let clear = (middle == 0 || boxes[middle].minX - boxes[middle - 1].maxX >= size * 0.8) && (middle + 1 >= boxes.count || boxes[middle + 1].minX - boxes[middle].maxX >= size * 0.8)
+            return clear ? parts : [entry]
+        }
+    }
+
     private static func rewriteStackedPairs(_ found: inout [(selection: PDFSelection, text: String)], respacedTokens: inout [[String: String]],
                                             on page: PDFPage, ink: InkMap) {
         // A piece whose start went into a fraction above it, as the "2" of "1/2" before "|s₂ − s₁|d and 1",
@@ -2722,7 +2819,11 @@ enum PDFLayoutAnalyzer {
                 guard left.count >= 3, right.count >= 3, blocks[first].rect.maxX < blocks[second].rect.minX, blocks[second].rect.minX - blocks[first].rect.maxX < 150,
                       widths.min()! * 2 >= widths.max()!, !(left + right).contains(where: { lines[$0].small }) else { continue }
                 let paired = left.filter { l in right.contains { sameRow(lines[l].bounds, lines[$0].bounds) } }
-                guard paired.count * 10 >= min(left.count, right.count) * 8 else { continue }
+                // A word between them, as the "and" of "… and …", joins two displays, not two columns.
+                let gap = CGRect(x: blocks[first].rect.maxX, y: min(blocks[first].rect.minY, blocks[second].rect.minY), width: blocks[second].rect.minX - blocks[first].rect.maxX,
+                                 height: max(blocks[first].rect.maxY, blocks[second].rect.maxY) - min(blocks[first].rect.minY, blocks[second].rect.minY))
+                let joined = lines.contains { $0.block == nil && $0.text.range(of: #"^(and|or)$"#, options: .regularExpression) != nil && gap.contains(CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)) }
+                guard paired.count * 10 >= min(left.count, right.count) * 8, !joined else { continue }
                 for index in right { lines[index].block = first }
                 var rect = blocks[first].rect.union(blocks[second].rect)
                 blocks[second].rect = .null
@@ -2760,6 +2861,27 @@ enum PDFLayoutAnalyzer {
                 let rest = others.reduce(CGRect.null) { $0.union($1) }
                 let clear = CGRect(x: lines[index].bounds.maxX, y: -1e6, width: 2e6, height: 2e6)
                 blocks[block].rect = blocks[block].kind == .image ? blocks[block].rect.intersection(clear).union(rest) : rest
+            }
+            // Two displays on one row with a word between, as "… = [1 4; 3 9; 8 6] and [1 4; …] · …",
+            // are two pictures.
+            for index in lines.indices where lines[index].block == nil && lines[index].text.range(of: #"^(and|or)$"#, options: .regularExpression) != nil {
+                let bounds = lines[index].bounds, rect = blocks[block].rect
+                guard bounds.midY > rect.minY, bounds.midY < rect.maxY, bounds.minX > rect.minX, bounds.maxX < rect.maxX else { continue }
+                let current = lines.indices.filter { lines[$0].block == block && !lines[$0].text.trimmingCharacters(in: .whitespaces).isEmpty }
+                let left = current.filter { lines[$0].bounds.maxX <= bounds.minX + 1 }, right = current.filter { lines[$0].bounds.minX >= bounds.maxX - 1 }
+                guard !left.isEmpty, !right.isEmpty, left.count + right.count == current.count else { continue }
+                // Blank pieces, as the halves of a bracket PDFKit gave no text, go with the side they are on.
+                let blank = lines.indices.filter { lines[$0].block == block && !current.contains($0) }
+                let rightSide = right + blank.filter { lines[$0].bounds.midX > bounds.midX }
+                let image = blocks[block].kind == .image
+                let after = CGRect(x: bounds.maxX, y: rect.minY, width: max(0, rect.maxX - bounds.maxX), height: rect.height)
+                let before = CGRect(x: rect.minX, y: rect.minY, width: max(0, bounds.minX - rect.minX), height: rect.height)
+                let rightRect = rightSide.reduce(image ? after : CGRect.null) { $0.union(lines[$1].bounds) }
+                // It is read after the word.
+                blocks.append(Block(kind: blocks[block].kind, rect: rightRect, firstLine: max(rightSide.min() ?? index + 1, index + 1)))
+                for member in rightSide { lines[member].block = blocks.count - 1 }
+                blocks[block].rect = lines.indices.filter { lines[$0].block == block }.reduce(image ? before : CGRect.null) { $0.union(lines[$1].bounds) }
+                if blocks[block].firstLine != nil { blocks[block].firstLine = lines.indices.first { lines[$0].block == block } }
             }
             // A display, then the sentence at its left, then the next display under both.
             for index in lines.indices where lines[index].block == nil && leadIn(lines[index].text) {
@@ -4009,6 +4131,21 @@ private struct FineInk {
                 } else if hangs, ratio <= 0.8, rowRuns.allSatisfy({ $0 == 1 }), let first = runs(row: top).first, let last = runs(row: bottom).first,
                           last.lowerBound - first.lowerBound >= (right - left) / 2 {
                     result += "\\"
+                } else if height >= size * 0.85, ratio <= 0.7, glyph.bottom <= baseline - size * 0.1, { () -> Bool in
+                    // "Does not divide": an upright bar, and a slash across its middle that widens it.
+                    let widths = rows.map { row in runs(row: row).reduce(0) { $0 + $1.count } }
+                    let ends = Array(widths.prefix(max(1, widths.count / 5))) + Array(widths.suffix(max(1, widths.count / 5)))
+                    let across = middle.map { row in runs(row: row).reduce(0) { $0 + $1.count } }.max() ?? 0
+                    // The bar stands upright, unlike an italic "f"; the slash moves along as it crosses,
+                    // unlike a cross-bar.
+                    func centre(_ row: Int) -> Double? { runs(row: row).first.map { Double($0.lowerBound + $0.upperBound) / 2 } }
+                    guard let high = centre(top), let low = centre(bottom), abs(high - low) <= max(2, Double(right - left) * 0.2) else { return false }
+                    let wide = middle.filter { row in runs(row: row).reduce(0) { $0 + $1.count } >= median(ends) * 2 }
+                    let starts = wide.compactMap { runs(row: $0).first?.lowerBound }, ends2 = wide.compactMap { runs(row: $0).last?.upperBound }
+                    guard wide.count >= 3, let a = starts.min(), let b = starts.max(), let c = ends2.min(), let d = ends2.max(), b - a >= 2 || d - c >= 2 else { return false }
+                    return across >= 3 && across >= median(ends) * 2
+                }() {
+                    result += "∤"
                 } else if (0.7...1.4).contains(ratio), let box = { () -> String? in
                     // A box's sides: a stroke runs along a side when nearly every row, or column,
                     // has ink within a quarter of the glyph from it; the middle stays blank.
@@ -4035,7 +4172,7 @@ private struct FineInk {
                 return nil
             }
         }
-        return result.contains(where: { "∅\\□⊏⊐".contains($0) }) ? result : nil
+        return result.contains(where: { "∅\\□⊏⊐∤".contains($0) }) ? result : nil
     }
 
     /// The glyphs in `area` as runs of connected ink, left to right, with where their ink ends
