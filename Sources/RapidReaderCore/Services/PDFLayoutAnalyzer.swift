@@ -950,7 +950,12 @@ enum PDFLayoutAnalyzer {
                 let line = lines[index].text, range = expression.range
                 let apart = (range.lowerBound == line.startIndex || line[line.index(before: range.lowerBound)].isWhitespace)
                     && (range.upperBound == line.endIndex || !line[range.upperBound].isLetter)
-                if chain == nil, apart, rect.height <= usualHeight * 1.35, isPlainMath(String(line[range])),
+                // One that wraps, as "f(k −" ending a line and "1)" opening the next, is read whole.
+                var whole = String(line[range])
+                if expression.atEnd, index + 1 < lines.count, let rest = lines[index + 1].text.firstMatch(of: /^\s*([^\s()]{1,6}\))/) {
+                    whole += " " + rest.output.1
+                }
+                if chain == nil, apart, rect.height <= usualHeight * 1.35, isPlainMath(whole),
                    let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
                 // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first
                 // blank row, a little way at most.
