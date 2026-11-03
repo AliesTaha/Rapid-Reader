@@ -122,10 +122,19 @@ enum WordSplitter {
 
     private static let joiningWords: Set<String> = ["of", "to", "in", "and", "is", "for", "the", "with", "as"]
 
+    /// Words of machine learning and computing the spelling dictionary lacks; a split that finds
+    /// one wins, so "theseshardings" is "these shardings", not "theses hardings".
+    private static let technicalWords: Set<String> = Set("""
+        shard shards sharded sharding shardings unsharded matmul matmuls allgather allreduce reducescatter alltoall
+        dataset datasets runtime runtimes tokenizer tokenizers prefill backprop dropout softmax layernorm
+        """.split(whereSeparator: \.isWhitespace).map(String.init))
+
     /// Fewer words first, then more common words, then the more even split, so
     /// "areconditioned" is "are conditioned" rather than "a reconditioned".
     private static func better(_ candidate: (words: [String], common: Int), than current: (words: [String], common: Int)) -> Bool {
         if candidate.words.count != current.words.count { return candidate.words.count < current.words.count }
+        func technical(_ words: [String]) -> Int { words.filter { technicalWords.contains($0.lowercased()) }.count }
+        if technical(candidate.words) != technical(current.words) { return technical(candidate.words) > technical(current.words) }
         if candidate.common != current.common { return candidate.common > current.common }
         func spread(_ words: [String]) -> Int { words.reduce(0) { $0 + $1.count * $1.count } }
         return spread(candidate.words) < spread(current.words)
@@ -147,6 +156,7 @@ enum WordSplitter {
     static func isWord(_ word: String) -> Bool {
         // Ligatures such as "ﬀ" are spelled out before checking.
         let plain = word.precomposedStringWithCompatibilityMapping
+        if technicalWords.contains(plain.lowercased()) { return true }
         lock.lock()
         if let cached = known[plain] { lock.unlock(); return cached }
         lock.unlock()

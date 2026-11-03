@@ -77,12 +77,14 @@ public enum PDFTextExtractor {
             }
             func text(from start: (page: Int, line: Int), to end: (page: Int, line: Int)) -> String {
                 guard start < end else { return "" }
-                return (start.page...min(end.page, pages.count - 1)).map { page in
+                let joinedText = (start.page...min(end.page, pages.count - 1)).map { page in
                     let lines = pageLines[page]
                     let first = page == start.page ? start.line : 0
                     let last = page == end.page ? end.line : lines.count
                     return first < last ? lines[first..<last].joined(separator: "\n") : ""
                 }.joined(separator: "\n\n")
+                // A word broken at the foot of a page, as "antici-" over the next page's "pate", is joined.
+                return dehyphenated(joinedText)
             }
             // The section's title shows above its text, so the heading it starts with, as "3.1
             // Sorting theory" or "Chapter 3" over "Sorting", is not read again.
@@ -130,6 +132,16 @@ public enum PDFTextExtractor {
             sections = kept.enumerated().map { position, index in
                 let end = position + 1 < kept.count ? entries[kept[position + 1]].start : (pages.count, 0)
                 var start = entries[index].start
+                // A heading's number can stand on a line of its own before it, as "7.4" over "Designing
+                // an Effective Inference Engine"; it goes with the heading.
+                func number(_ line: String) -> Bool {
+                    let plain = line.hasPrefix(mark) ? String(line.dropFirst(mark.count)) : line
+                    return plain.trimmingCharacters(in: .whitespaces).range(of: #"^([A-Z]|\d+)(\.\d+)*\.?$"#, options: .regularExpression) != nil
+                }
+                if start.page < pageLines.count, start.line + 1 < pageLines[start.page].count, number(pageLines[start.page][start.line]),
+                   heading(pageLines[start.page][start.line + 1], of: entries[index].title, partly: true) {
+                    start.line += 1
+                }
                 for _ in 0..<2 where start.page < pageLines.count && start.line < pageLines[start.page].count
                     && (start.page, start.line) < (end.0, end.1) && heading(pageLines[start.page][start.line], of: entries[index].title, partly: true) {
                     start.line += 1
@@ -380,8 +392,38 @@ public enum PDFTextExtractor {
         return result
     }
 
+    /// A capital PDFKit set apart from the rest of its word, as "T eacher" or "W e", where a browser
+    /// kerned the two close: the rest alone is no word and the whole is one.
+    static func joiningKernedCapitals(_ text: String) -> String {
+        guard let pattern = try? NSRegularExpression(pattern: #"(?<![\p{L}\p{N}])([B-HJ-Z]) (\p{Ll}{1,14})(?![\p{L}\p{N}])"#) else { return text }
+        var result = text
+        for match in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let whole = Range(match.range, in: result), let first = Range(match.range(at: 1), in: result), let second = Range(match.range(at: 2), in: result) else { continue }
+            let head = String(result[first]), tail = String(result[second])
+            guard !WordSplitter.isWord(tail), WordSplitter.isWord(head + tail) else { continue }
+            result.replaceSubrange(whole, with: head + tail)
+        }
+        return result
+    }
+
     static func dehyphenated(_ text: String) -> String {
-        guard let pattern = try? NSRegularExpression(pattern: #"(\p{L}+)-\n(\p{Ll}[\p{L}ﬀﬁﬂﬃﬄ]*)"#) else { return text }
+        // A word can break across a page too, as "antici-" ending one page and "pate" opening the next.
+        guard let pattern = try? NSRegularExpression(pattern: #"(\p{L}+)-\n\n?(\p{Ll}[\p{L}ﬀﬁﬂﬃﬄ]*)"#) else { return text }
+        // A compound broken before a name or a figure, as "MOPD-" + "Adam" or "update-" + "470", keeps its hyphen
+        // and no space; a word the text writes whole elsewhere, as "AllGather", or one in capitals, as
+        // "CON-" + "TRACTING", is joined.
+        var text = text
+        // A picture's marker after the break, as "meth-" over a display, is no part of the word.
+        if let capital = try? NSRegularExpression(pattern: #"([\p{L}\p{N}]{2,})-\n\n?(?!\#(PDFLayoutAnalyzer.markerPrefix))([\p{Lu}\p{N}][\p{L}\p{N}]*)"#) {
+            for match in capital.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+                guard let whole = Range(match.range, in: text), let first = Range(match.range(at: 1), in: text), let second = Range(match.range(at: 2), in: text) else { continue }
+                let head = String(text[first]), tail = String(text[second])
+                let joined = head + tail
+                let closed = text.range(of: #"\b"# + NSRegularExpression.escapedPattern(for: joined) + #"\b"#, options: .regularExpression) != nil
+                    || head.allSatisfy(\.isUppercase) && tail.allSatisfy(\.isUppercase) && WordSplitter.isWord(joined.lowercased())
+                text.replaceSubrange(whole, with: closed ? joined : head + "-" + tail)
+            }
+        }
         var result = text
         for match in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
             guard let whole = Range(match.range, in: result), let first = Range(match.range(at: 1), in: result),
@@ -631,7 +673,7 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #",−\s(?=\p{L})"#, with: ", −", options: .regularExpression)
                 .replacingOccurrences(of: "ﬃ", with: "ffi").replacingOccurrences(of: "ﬄ", with: "ffl")
                 .replacingOccurrences(of: "ﬀ", with: "ff").replacingOccurrences(of: "ﬁ", with: "fi").replacingOccurrences(of: "ﬂ", with: "fl")
-            return TextProcessor.normalizedText(writingDecimalPowers(endingIndexedLists(rejoiningSplitWords(dehyphenated(attachingAccents(composingNameAccents(separatingIdentifiers(joined))))))))
+            return TextProcessor.normalizedText(writingDecimalPowers(endingIndexedLists(rejoiningSplitWords(joiningKernedCapitals(dehyphenated(attachingAccents(composingNameAccents(separatingIdentifiers(joined)))))))))
         }
     }
     /// A name's accent that PDFKit set apart before its letter, as "K˝ onig", "Sta´ nczyk" or

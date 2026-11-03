@@ -171,15 +171,46 @@ enum PDFLayoutAnalyzer {
             // A heading over several lines, as a title and its subtitle, is one: only its first line
             // starts it.
             // One with mathematics in it, as "Case c = 1", opens with a capitalised word.
-            for index in lines.indices where sizes[index].map({ $0 >= body * 1.2 }) == true && (lines[index].kind == nil
+            // A web page's headings step up little from its text, as 10.8 points over 10.2, and can
+            // run to a sentence, as "Chapter 1. The question: is RL with SGD sparse enough to compress?".
+            let web = printedFromWeb(page)
+            // Its text is the size its sentences are set in; a table's small cells can outweigh them.
+            // A page of small print, as a list of notes, is measured against the whole document's text.
+            let prose = lines.indices.filter { lines[$0].text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 8 }.compactMap { sizes[$0] }.sorted()
+            let text = web ? max(body, prose.isEmpty ? body : prose[prose.count / 2], documentTextSize(page) ?? 0) : body
+            for index in lines.indices where sizes[index].map({ $0 >= text * (web ? 1.04 : 1.2) }) == true && (lines[index].kind == nil
                 || lines[index].kind == .formula && lines[index].text.range(of: #"^\p{Lu}\p{Ll}{2,}\s"#, options: .regularExpression) != nil) {
                 let words = lines[index].text.split(whereSeparator: \.isWhitespace)
                 let continued = index > 0 && sizes[index - 1].map { abs($0 - sizes[index]!) < 0.5 } == true
                     && lines[index - 1].bounds.minY - lines[index].bounds.maxY < sizes[index]! * 1.5
                 // A name in capitals, as "IOI" or "ICPC", can be a heading too.
-                lines[index].heading = !continued && (1...8).contains(words.count) && words.contains(where: { isWord($0) || $0.count >= 2 && $0.allSatisfy(\.isUppercase) })
+                // On a web page a display set large, as "min ∥ x− …", is no heading: a heading has words.
+                func named(_ word: Substring) -> Bool {
+                    let letters = wordLetters(String(word))
+                    return letters.count >= 3 && letters.count * 10 >= word.count * 7 && isDictionaryWord(letters.lowercased()) && !mathWords.contains(letters.lowercased())
+                }
+                let named = !web || words.filter(named).count >= 2 || words.count <= 2 && words.contains(where: named)
+                lines[index].heading = !continued && named && (1...(web ? 24 : 8)).contains(words.count) && words.contains(where: { isWord($0) || $0.count >= 2 && $0.allSatisfy(\.isUppercase) })
                     && lines[index].text.range(of: #"[.,;:]$"#, options: .regularExpression) == nil
                 if lines[index].heading { lines[index].kind = nil }
+            }
+            // A web page's heading wrapped over two lines, as "Do all four runs follow the experts'" +
+            // "Math curriculum?", is one title.
+            if web {
+                for index in lines.indices where lines[index].heading {
+                    var next = index + 1
+                    // The rest of its row, PDFKit can give as a piece of its own beside it.
+                    while next < lines.count, let size = sizes[index], sizes[next].map({ abs($0 - size) < 0.5 }) == true,
+                          lines[next].bounds.maxY <= lines[index].bounds.minY + 1 && lines[next - 1].bounds.minY - lines[next].bounds.maxY < size * 1.5
+                            || abs(lines[next].bounds.midY - lines[next - 1].bounds.midY) < size * 0.4 && lines[next].bounds.minX >= lines[next - 1].bounds.maxX - 1
+                                && lines[next].bounds.minX - lines[next - 1].bounds.maxX < size * 3,
+                          !lines[next].heading, lines[next].text.split(whereSeparator: \.isWhitespace).count <= 16 {
+                        lines[index].text += " " + lines[next].text
+                        lines[index].bounds = lines[index].bounds.union(lines[next].bounds)
+                        lines[next].text = ""
+                        next += 1
+                    }
+                }
             }
         }
         // PDFKit can report a sentence's box tall enough to cover the display beside it, as for
@@ -212,7 +243,22 @@ enum PDFLayoutAnalyzer {
                 .map { fullHeight($0.bounds, lineHeight: lineHeight) }
             // Sentences of the text column, as "Thus, we can calculate 𝑓(𝑛) using the formula".
             let sentences = lines.filter { $0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 4 && $0.bounds.width >= 100 }.map(\.bounds)
-            for region in graphicRegions(on: page, bounds: pageBounds, textRects: textRects, labels: lines.map { fullHeight($0.bounds, lineHeight: lineHeight) }, sentences: sentences) {
+            var regions = graphicRegions(on: page, bounds: pageBounds, textRects: textRects, labels: lines.map { fullHeight($0.bounds, lineHeight: lineHeight) }, sentences: sentences)
+            // A picture the page draws from a bitmap, as a chart a web page shows, is the whole
+            // bitmap: its white margins and faint labels are its own, and ink found across it is one picture.
+            for raster in rasterImageRects(on: page) where raster.width >= 40 && raster.height >= 40 {
+                var area = raster.intersection(pageBounds)
+                guard !area.isNull else { continue }
+                // Its blank margins are not shown.
+                if let ink = pageInk?.inkBounds(in: area, excluding: []) { area = ink.insetBy(dx: -2, dy: -2).intersection(area) }
+                // A scanned page's image under its own text is the page, not a picture.
+                let words = lines.filter { area.contains(CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)) }.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).filter(isWord).count }
+                guard words < 40 else { continue }
+                let overlapping = regions.filter { $0.intersects(area) }
+                regions.removeAll { $0.intersects(area) }
+                regions.append(overlapping.reduce(area) { $0.union($1) })
+            }
+            for region in regions {
                 addGraphic(region, to: &blocks, lines: &lines, pageArea: pageBounds.width * pageBounds.height)
             }
             mergeNeighbours(&blocks, lines: &lines, acrossKinds: true)
@@ -677,7 +723,7 @@ enum PDFLayoutAnalyzer {
             var visited: Set<Int> = []
             // A row grows from a piece of sentence; pieces join it only when centred on that line.
             func sentencePiece(_ index: Int) -> Bool {
-                lines[index].block == nil && lines[index].bounds.height <= lineHeight * 2.5
+                lines[index].block == nil && !(fromWeb && lines[index].heading) && lines[index].bounds.height <= lineHeight * 2.5
                     && lines[index].text.split(whereSeparator: \.isWhitespace).filter({ isProseToken(String($0)) }).count >= 2
             }
             for start in lines.indices where !visited.contains(start) && sentencePiece(start) {
@@ -807,7 +853,8 @@ enum PDFLayoutAnalyzer {
                 taken.formUnion(row)
             }
         }
-        for index in lines.indices where lines[index].block == nil && lines[index].kind == nil && !taken.contains(index)
+        // A web page's heading reads as text: its title is the words it prints.
+        for index in lines.indices where lines[index].block == nil && lines[index].kind == nil && !taken.contains(index) && !(fromWeb && lines[index].heading)
             && lines[index].text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 1 {
             let own = lines[index].bounds
             // A subscript can start under the last letter of the sentence.
@@ -848,7 +895,7 @@ enum PDFLayoutAnalyzer {
             taken.formUnion(pieces)
             if let claim = chain.claim { claimed[claim.line] = claim.range }
         }
-        for index in lines.indices where lines[index].block == nil && lines[index].kind == nil && !taken.contains(index) {
+        for index in lines.indices where lines[index].block == nil && lines[index].kind == nil && !taken.contains(index) && !(fromWeb && lines[index].heading) {
             var expressions = inlineExpressions(in: lines[index].text, selection: found[index].selection, page: page, pageText: pageText)
             if let chain = chains[index] {
                 if expressions.last?.range == chain.tail { expressions.removeLast() }
@@ -1160,7 +1207,7 @@ enum PDFLayoutAnalyzer {
         // Mathematics left on a line of its own with no word to read, as "µj/βj/" or "nj,inv"
         // between pieces PDFKit split apart, is shown as typeset rather than read out.
         if let ink = inlineInk {
-            for index in lines.indices where lines[index].block == nil && !lines[index].text.contains(markerPrefix) {
+            for index in lines.indices where lines[index].block == nil && !lines[index].text.contains(markerPrefix) && !(fromWeb && lines[index].heading) {
                 let text = lines[index].text.trimmingCharacters(in: .whitespaces)
                 let tokens = text.split(whereSeparator: \.isWhitespace).map(String.init)
                 // Words glued to the mathematics, as in "words,onlyoneofˆ" or "𝑀to𝑌:", are read.
@@ -2415,6 +2462,32 @@ enum PDFLayoutAnalyzer {
 
     /// Mathematics that reads as it is written: names, figures and common signs, with no index
     /// left on the line as "x1", no accent and no Greek or mathematical letters.
+    /// The size a document's sentences are set in, from its first pages: lines of eight words
+    /// or more, by amount of text. A page of small print does not set it.
+    nonisolated(unsafe) private static var textSizes: [ObjectIdentifier: CGFloat] = [:]
+    private static let textSizesLock = NSLock()
+    static func documentTextSize(_ page: PDFPage) -> CGFloat? {
+        guard let document = page.document else { return nil }
+        let key = ObjectIdentifier(document)
+        textSizesLock.lock()
+        if let known = textSizes[key] { textSizesLock.unlock(); return known }
+        textSizesLock.unlock()
+        var amounts: [CGFloat: Int] = [:]
+        for index in 0..<min(document.pageCount, 12) {
+            guard let sample = document.page(at: index), let all = sample.selection(for: sample.bounds(for: .cropBox)) else { continue }
+            for line in all.selectionsByLine() {
+                let text = line.string ?? ""
+                guard text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 8, let size = fontSize(of: line) else { continue }
+                amounts[(size * 10).rounded() / 10, default: 0] += text.count
+            }
+        }
+        guard let size = amounts.max(by: { ($0.value, $0.key) < ($1.value, $1.key) })?.key else { return nil }
+        textSizesLock.lock()
+        textSizes[key] = size
+        textSizesLock.unlock()
+        return size
+    }
+
     /// A page a web browser printed sets its mathematics as text, in the page's own characters;
     /// what lies on one row there reads as it is written, unlike TeX's symbols.
     static func printedFromWeb(_ page: PDFPage) -> Bool {
@@ -4326,6 +4399,82 @@ enum PDFLayoutAnalyzer {
                 }
             }
         }
+    }
+
+    /// Where the page draws its bitmaps: each image XObject's unit square under the transform in
+    /// force, through forms drawn inside the page too.
+    static func rasterImageRects(on page: PDFPage) -> [CGRect] {
+        guard let pdfPage = page.pageRef else { return [] }
+        final class State {
+            var stack: [CGAffineTransform] = [.identity]
+            var rects: [CGRect] = []
+            var depth = 0
+            var table: CGPDFOperatorTableRef?
+        }
+        let state = State()
+        guard let table = CGPDFOperatorTableCreate() else { return [] }
+        state.table = table
+        CGPDFOperatorTableSetCallback(table, "q") { _, info in
+            let state = Unmanaged<State>.fromOpaque(info!).takeUnretainedValue()
+            state.stack.append(state.stack.last ?? .identity)
+        }
+        CGPDFOperatorTableSetCallback(table, "Q") { _, info in
+            let state = Unmanaged<State>.fromOpaque(info!).takeUnretainedValue()
+            if state.stack.count > 1 { state.stack.removeLast() }
+        }
+        CGPDFOperatorTableSetCallback(table, "cm") { scanner, info in
+            let state = Unmanaged<State>.fromOpaque(info!).takeUnretainedValue()
+            var values = [CGPDFReal](repeating: 0, count: 6)
+            for index in (0..<6).reversed() { guard CGPDFScannerPopNumber(scanner, &values[index]) else { return } }
+            let matrix = CGAffineTransform(a: values[0], b: values[1], c: values[2], d: values[3], tx: values[4], ty: values[5])
+            state.stack[state.stack.count - 1] = matrix.concatenating(state.stack.last ?? .identity)
+        }
+        CGPDFOperatorTableSetCallback(table, "Do") { scanner, info in
+            let state = Unmanaged<State>.fromOpaque(info!).takeUnretainedValue()
+            var name: UnsafePointer<CChar>?
+            guard CGPDFScannerPopName(scanner, &name), let name else { return }
+            let content = CGPDFScannerGetContentStream(scanner)
+            guard let object = CGPDFContentStreamGetResource(content, "XObject", name) else { return }
+            var stream: CGPDFStreamRef?
+            guard CGPDFObjectGetValue(object, .stream, &stream), let stream, let dictionary = CGPDFStreamGetDictionary(stream) else { return }
+            var subtype: UnsafePointer<CChar>?
+            guard CGPDFDictionaryGetName(dictionary, "Subtype", &subtype), let subtype else { return }
+            let current = state.stack.last ?? .identity
+            switch String(cString: subtype) {
+            case "Image":
+                state.rects.append(CGRect(x: 0, y: 0, width: 1, height: 1).applying(current))
+            case "Form" where state.depth < 6:
+                var matrix = CGAffineTransform.identity
+                var array: CGPDFArrayRef?
+                if CGPDFDictionaryGetArray(dictionary, "Matrix", &array), let array, CGPDFArrayGetCount(array) == 6 {
+                    var values = [CGPDFReal](repeating: 0, count: 6)
+                    for index in 0..<6 { CGPDFArrayGetNumber(array, index, &values[index]) }
+                    matrix = CGAffineTransform(a: values[0], b: values[1], c: values[2], d: values[3], tx: values[4], ty: values[5])
+                }
+                var resources: CGPDFDictionaryRef?
+                _ = CGPDFDictionaryGetDictionary(dictionary, "Resources", &resources)
+                let inner = CGPDFContentStreamCreateWithStream(stream, resources ?? dictionary, content)
+                state.stack.append(matrix.concatenating(current))
+                state.depth += 1
+                if let table = state.table {
+                    let nested = CGPDFScannerCreate(inner, table, info)
+                    CGPDFScannerScan(nested)
+                    CGPDFScannerRelease(nested)
+                }
+                state.depth -= 1
+                state.stack.removeLast()
+                CGPDFContentStreamRelease(inner)
+            default:
+                break
+            }
+        }
+        let content = CGPDFContentStreamCreateWithPage(pdfPage)
+        let scanner = CGPDFScannerCreate(content, table, Unmanaged.passUnretained(state).toOpaque())
+        CGPDFScannerScan(scanner)
+        CGPDFScannerRelease(scanner)
+        CGPDFContentStreamRelease(content)
+        CGPDFOperatorTableRelease(table)
+        return state.rects.filter { !$0.isNull && $0.width > 0 && $0.height > 0 }
     }
 
     private static func addGraphic(_ region: CGRect, to blocks: inout [Block], lines: inout [Line], pageArea: CGFloat) {
