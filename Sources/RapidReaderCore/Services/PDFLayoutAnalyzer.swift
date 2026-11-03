@@ -2557,6 +2557,23 @@ enum PDFLayoutAnalyzer {
                 else { rect.size.height = bounds.minY - 0.5 - rect.minY }
                 if rect.height > 4 { blocks[block].rect = rect }
             }
+            // A row of results under the drawings, as "a × b = 6  a × b = 0  a × b = −8", that
+            // PDFKit made a formula of its own, is their caption row.
+            // A display taken as a picture, whose labels hold "=", is no drawing to caption.
+            let drawing = !lines.contains { $0.block == block && $0.text.contains("=") }
+            for other in blocks.indices where drawing && other != block && blocks[other].kind == .formula && !blocks[other].rect.isNull {
+                let rect = blocks[block].rect, row = blocks[other].rect
+                let members = lines.indices.filter { lines[$0].block == other }
+                let gap = row.maxY < rect.midY ? rect.minY - row.maxY : row.minY - rect.maxY
+                guard !members.isEmpty, gap >= -1, gap < height * 1.5, row.minX >= rect.minX - 30, row.maxX <= rect.maxX + 30, row.width >= rect.width * 0.6,
+                      members.count >= 2 || members.allSatisfy({ lines[$0].text.split(whereSeparator: \.isWhitespace).count >= 6 }),
+                      members.allSatisfy({ min(lines[$0].bounds.maxY, row.maxY) - max(lines[$0].bounds.minY, row.minY) >= lines[$0].bounds.height * 0.5 }),
+                      row.height <= height * 1.6,
+                      !members.contains(where: { lines[$0].text.split(whereSeparator: \.isWhitespace).contains { $0.count >= 3 && isDictionaryWord(wordLetters($0).lowercased()) } }) else { continue }
+                for member in members { lines[member].block = block }
+                blocks[block].rect = rect.union(row)
+                blocks[other].rect = .null
+            }
             for index in lines.indices where lines[index].block == nil && !lines[index].heading && !lines[index].text.isEmpty {
                 let bounds = lines[index].bounds, rect = blocks[block].rect
                 let tokens = lines[index].text.split(whereSeparator: \.isWhitespace)
