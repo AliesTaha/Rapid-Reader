@@ -185,7 +185,9 @@ enum PDFLayoutAnalyzer {
                 return !tokens.allSatisfy { $0.count <= 3 } || tokens.count >= 5 && tokens.contains(where: isWord)
             }
                 .map { fullHeight($0.bounds, lineHeight: lineHeight) }
-            for region in graphicRegions(on: page, bounds: pageBounds, textRects: textRects, labels: lines.map { fullHeight($0.bounds, lineHeight: lineHeight) }) {
+            // Sentences of the text column, as "Thus, we can calculate 𝑓(𝑛) using the formula".
+            let sentences = lines.filter { $0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 4 && $0.bounds.width >= 100 }.map(\.bounds)
+            for region in graphicRegions(on: page, bounds: pageBounds, textRects: textRects, labels: lines.map { fullHeight($0.bounds, lineHeight: lineHeight) }, sentences: sentences) {
                 addGraphic(region, to: &blocks, lines: &lines, pageArea: pageBounds.width * pageBounds.height)
             }
             mergeNeighbours(&blocks, lines: &lines, acrossKinds: true)
@@ -231,6 +233,7 @@ enum PDFLayoutAnalyzer {
         attachTableHeaders(&blocks, lines: &lines)
         absorbEnclosedRows(&blocks, lines: &lines)
         settleFigureLabels(&blocks, lines: &lines)
+        releaseLeadIns(&blocks, lines: &lines)
         // A word of the sentence that a formula follows, as the "is" before "|(2·5 − 5·4) + …|", is read.
         for index in lines.indices where lines[index].block.map({ blocks[$0].kind == .formula }) == true
             && lines[index].text.range(of: #"^(is|are|where|and|or|then|so|as|gives|equals)$"#, options: .regularExpression) != nil {
@@ -273,10 +276,21 @@ enum PDFLayoutAnalyzer {
         if blocks.contains(where: { $0.kind == .formula || $0.kind == .code }), let ink = InkMap(page: page, bounds: pageBounds) {
             let sentences = lines.filter { $0.block == nil && ($0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3
                 || $0.text.range(of: #"[A-Za-z]{5,}"#, options: .regularExpression) != nil) }.map(\.bounds)
+            let prose = lines.filter { $0.block == nil && $0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3 }.map(\.bounds)
             for index in blocks.indices where (blocks[index].kind == .formula || blocks[index].kind == .code) && !blocks[index].rect.isNull {
                 // Following the ink must not run along a line of prose.
                 let widened = ink.widened(blocks[index].rect)
-                if !sentences.contains(where: { widened.contains(CGPoint(x: $0.midX, y: $0.midY)) || ($0.intersects(widened) && !$0.intersects(blocks[index].rect)) }) {
+                // Nor run sideways into the letters of a sentence whose box reaches into the display's.
+                let rect = blocks[index].rect
+                let sides = [CGRect(x: widened.minX, y: widened.minY, width: max(0, rect.minX - widened.minX), height: widened.height),
+                             CGRect(x: rect.maxX, y: widened.minY, width: max(0, widened.maxX - rect.maxX), height: widened.height)]
+                let alongside = prose.contains { sentence in
+                    sides.contains { side in
+                        let overlap = side.intersection(sentence)
+                        return !overlap.isNull && overlap.width >= 8 && overlap.height >= 3
+                    }
+                }
+                if !alongside, !sentences.contains(where: { widened.contains(CGPoint(x: $0.midX, y: $0.midY)) || ($0.intersects(widened) && !$0.intersects(blocks[index].rect)) }) {
                     blocks[index].rect = widened
                 }
             }
@@ -344,6 +358,40 @@ enum PDFLayoutAnalyzer {
                     let top = crop.maxY
                     crop.origin.y = max(crop.minY, bounds.maxY + 0.5)
                     crop.size.height = max(0, top - crop.minY)
+                }
+            }
+            // A sentence beside the top or foot of a display, as "The base cases for the recursion
+            // are" ending over a binomial's bracket, reports a box that reaches into the display's;
+            // its letters, measured where they stand clear of the display, mark where the crop ends.
+            let labelSpan = lines.filter { $0.block == index }.reduce(CGRect.null) { $0.union($1.bounds) }
+            if block.kind == .formula || block.kind == .image, !labelSpan.isNull, let pageInk {
+                let padded = labelled.union(labelSpan).insetBy(dx: -6, dy: -6)
+                for line in lines where line.block != index && line.bounds.intersects(crop)
+                    && line.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3 {
+                    let clear = line.bounds.minX < block.rect.minX - 12
+                        ? CGRect(x: line.bounds.minX, y: line.bounds.minY, width: block.rect.minX - 1 - line.bounds.minX, height: line.bounds.height)
+                        : line.bounds.maxX > block.rect.maxX + 12
+                        ? CGRect(x: block.rect.maxX + 1, y: line.bounds.minY, width: line.bounds.maxX - block.rect.maxX - 1, height: line.bounds.height)
+                        : CGRect.null
+                    guard !clear.isNull, let letters = pageInk.inkBounds(in: clear, excluding: []) else { continue }
+                    // The edge goes where the letters begin, back out as far as the padding where a cut
+                    // by the sentence's box took a raised mark of the display, as an exponent "n".
+                    func free(_ strip: CGRect) -> Bool {
+                        !lines.contains { other in other.block != index && other.bounds != line.bounds && !other.text.isEmpty && other.bounds.intersects(strip) }
+                    }
+                    if letters.minY >= labelSpan.maxY - 1, letters.minY < padded.maxY {
+                        let edge = min(padded.maxY, max(letters.minY - 0.5, labelSpan.maxY))
+                        if edge < crop.maxY || free(CGRect(x: crop.minX, y: crop.maxY, width: crop.width, height: edge - crop.maxY)) {
+                            crop.size.height = max(0, edge - crop.minY)
+                        }
+                    } else if letters.maxY <= labelSpan.minY + 1, letters.maxY > padded.minY {
+                        let edge = max(padded.minY, min(letters.maxY + 0.5, labelSpan.minY))
+                        if edge > crop.minY || free(CGRect(x: crop.minX, y: edge, width: crop.width, height: crop.minY - edge)) {
+                            let top = crop.maxY
+                            crop.origin.y = edge
+                            crop.size.height = max(0, top - crop.minY)
+                        }
+                    }
                 }
             }
             // A caption under or over the picture is never in it.
@@ -2619,6 +2667,45 @@ enum PDFLayoutAnalyzer {
     /// A drawing's labels set in a row under or over it, as "illegal illegal illegal valid" under
     /// four boards or "step 1 step 2 step 3" under three trees, are spread far wider than prose and
     /// belong to it; a heading that the drawing's box reached, as "Method 2", does not.
+    /// The sentence that leads into a display, as "For example," or "Such a matrix is" printed to
+    /// its left, is read; and where it stands between two displays, each is a picture of its own.
+    private static func releaseLeadIns(_ blocks: inout [Block], lines: inout [Line]) {
+        func leadIn(_ text: String) -> Bool {
+            let tokens = text.split(whereSeparator: \.isWhitespace).map { wordLetters(String($0)).lowercased() }
+            return tokens.count >= 2 && tokens.allSatisfy { $0 == "a" || $0.count >= 2 && isDictionaryWord($0) }
+                && text.range(of: #"(,|:|\b(is|are|by|as|follows|where|equals|holds|gives))$"#, options: .regularExpression) != nil
+        }
+        for block in blocks.indices where (blocks[block].kind == .formula || blocks[block].kind == .image) && !blocks[block].rect.isNull {
+            let members = lines.indices.filter { lines[$0].block == block }
+            for index in members where leadIn(lines[index].text) {
+                let others = members.filter { $0 != index }.map { lines[$0].bounds }
+                guard let left = others.map(\.minX).min(), lines[index].bounds.maxX <= left + 2, lines[index].bounds.maxX >= left - 40 else { continue }
+                lines[index].block = nil
+                lines[index].kind = nil
+                let rest = others.reduce(CGRect.null) { $0.union($1) }
+                let clear = CGRect(x: lines[index].bounds.maxX, y: -1e6, width: 2e6, height: 2e6)
+                blocks[block].rect = blocks[block].kind == .image ? blocks[block].rect.intersection(clear).union(rest) : rest
+            }
+            // A display, then the sentence at its left, then the next display under both.
+            for index in lines.indices where lines[index].block == nil && leadIn(lines[index].text) {
+                let bounds = lines[index].bounds, rect = blocks[block].rect
+                let current = lines.indices.filter { lines[$0].block == block }
+                guard blocks[block].kind == .formula, let left = current.map({ lines[$0].bounds.minX }).min(), bounds.maxX <= left + 2, bounds.maxX >= left - 40,
+                      bounds.midY > rect.minY, bounds.midY < rect.maxY else { continue }
+                let upper = current.filter { lines[$0].bounds.midY > bounds.midY }, lower = current.filter { lines[$0].bounds.midY < bounds.midY }
+                guard !upper.isEmpty, !lower.isEmpty,
+                      upper.allSatisfy({ lines[$0].bounds.minY >= bounds.minY - 2 }), lower.allSatisfy({ lines[$0].bounds.maxY <= bounds.maxY + 2 }) else { continue }
+                let above = CGRect(x: -1e6, y: bounds.maxY - 2, width: 2e6, height: 2e6), below = CGRect(x: -1e6, y: -1e6, width: 2e6, height: 1e6 + bounds.minY + 2)
+                let top = upper.reduce(CGRect.null) { $0.union(lines[$1].bounds) }, foot = lower.reduce(CGRect.null) { $0.union(lines[$1].bounds) }
+                let image = blocks[block].kind == .image
+                blocks[block].rect = image ? rect.intersection(above).union(top) : top
+                blocks.append(Block(kind: blocks[block].kind, rect: image ? rect.intersection(below).union(foot) : foot, firstLine: lower.min()))
+                for member in lower { lines[member].block = blocks.count - 1 }
+                if blocks[block].firstLine != nil { blocks[block].firstLine = upper.min() }
+            }
+        }
+    }
+
     private static func settleFigureLabels(_ blocks: inout [Block], lines: inout [Line]) {
         let height = typicalLineHeight(lines.map(\.bounds))
         let prose = lines.filter { $0.block == nil && $0.text.count >= 40 }.map { $0.bounds.width / CGFloat($0.text.count) }.sorted()
@@ -3468,7 +3555,7 @@ enum PDFLayoutAnalyzer {
 
     /// Drawings on the page: clusters of ink left after blanking out the text. Clusters are
     /// found in two dimensions, so a diagram in the margin beside the text stands on its own.
-    private static func graphicRegions(on page: PDFPage, bounds: CGRect, textRects: [CGRect], labels: [CGRect]) -> [CGRect] {
+    private static func graphicRegions(on page: PDFPage, bounds: CGRect, textRects: [CGRect], labels: [CGRect], sentences: [CGRect] = []) -> [CGRect] {
         let width = Int(bounds.width.rounded(.up)), height = Int(bounds.height.rounded(.up))
         guard width > 0, height > 0, width * height <= 6_000_000,
               let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
@@ -3516,48 +3603,77 @@ enum PDFLayoutAnalyzer {
                     }
                 }
             }
-            let rect = CGRect(x: minX * cell, y: minY * cell, width: (maxX - minX + 1) * cell, height: (maxY - minY + 1) * cell)
-            // Memory rows run top to bottom; PDF space runs bottom to top.
-            let placed = CGRect(x: bounds.minX + rect.minX, y: bounds.minY + CGFloat(height) - rect.maxY,
-                                width: min(rect.width, CGFloat(width) - rect.minX), height: rect.height)
-            // Wide or tall: a column of nodes joined by an edge is as much a drawing as a row.
-            // A column as narrow as one node, as "2" over "5" joined by an edge, counts too when an
-            // unbroken stroke runs down it; a column of leader dots has none.
-            func stroke() -> Bool {
-                for x in Int(rect.minX)..<min(width, Int(rect.maxX)) {
-                    var run = 0
-                    for y in Int(rect.minY)..<min(height, Int(rect.maxY)) {
-                        run = data[y * width + x] < 200 ? run + 1 : 0
-                        if run >= 15 { return true }
-                    }
+            // Two displays a sentence apart, as matrices whose brackets reach towards each other
+            // past the line between them, are two pictures: the ink parts where a blank band that
+            // a line of prose runs through crosses it.
+            var cuts: [ClosedRange<Int>] = []
+            var empty: Int?
+            for cy in minY...maxY + 1 {
+                let used = cy <= maxY && (minX...maxX).contains { label[cy * columns + $0] == start }
+                if !used, empty == nil { empty = cy }
+                if used || cy > maxY, let first = empty {
+                    empty = nil
+                    guard cy <= maxY, cy - first >= 4 else { continue }
+                    let top = CGFloat(height - first * cell), bottom = CGFloat(height - cy * cell)
+                    let left = CGFloat(minX * cell), right = CGFloat((maxX + 1) * cell)
+                    if sentences.contains(where: { line in
+                        let rect = line.offsetBy(dx: -bounds.minX, dy: -bounds.minY)
+                        return rect.midY < top && rect.midY > bottom && rect.maxX > left && rect.minX < left - 20
+                    }) { cuts.append(first...(cy - 1)) }
                 }
-                return false
             }
-            if rect.height >= 16 && rect.width >= 40 || rect.height >= 40 && (rect.width >= 16 || rect.width >= 10 && stroke()), count >= 12 {
-                // Brackets, commas and descenders reaching past the boxes of lines of text are no
-                // drawing: some of a drawing's ink stands clear of the text.
-                let clear = textRects.filter { $0.intersects(placed) }.map { $0.offsetBy(dx: -bounds.minX, dy: -bounds.minY).insetBy(dx: -2, dy: -3.5) }
-                var stray = 0
-                for y in Int(rect.minY)..<min(height, Int(rect.maxY)) where stray < 20 {
-                    let point = CGFloat(height - y) - 0.5
-                    for x in Int(rect.minX)..<min(width, Int(rect.maxX)) where data[y * width + x] < 200
-                        && !clear.contains(where: { $0.contains(CGPoint(x: CGFloat(x) + 0.5, y: point)) }) {
-                        stray += 1
+            var pieces: [(minY: Int, maxY: Int)] = []
+            var from = minY
+            for cut in cuts { pieces.append((from, cut.lowerBound - 1)); from = cut.upperBound + 1 }
+            pieces.append((from, maxY))
+            for piece in pieces {
+                let cells = (piece.minY...piece.maxY).flatMap { cy in (minX...maxX).filter { label[cy * columns + $0] == start }.map { (x: $0, y: cy) } }
+                guard let pieceMinX = cells.map(\.x).min(), let pieceMaxX = cells.map(\.x).max(),
+                      let pieceMinY = cells.map(\.y).min(), let pieceMaxY = cells.map(\.y).max() else { continue }
+                let count = cuts.isEmpty ? count : cells.count
+                let rect = CGRect(x: pieceMinX * cell, y: pieceMinY * cell, width: (pieceMaxX - pieceMinX + 1) * cell, height: (pieceMaxY - pieceMinY + 1) * cell)
+                // Memory rows run top to bottom; PDF space runs bottom to top.
+                let placed = CGRect(x: bounds.minX + rect.minX, y: bounds.minY + CGFloat(height) - rect.maxY,
+                                    width: min(rect.width, CGFloat(width) - rect.minX), height: rect.height)
+                // Wide or tall: a column of nodes joined by an edge is as much a drawing as a row.
+                // A column as narrow as one node, as "2" over "5" joined by an edge, counts too when an
+                // unbroken stroke runs down it; a column of leader dots has none.
+                func stroke() -> Bool {
+                    for x in Int(rect.minX)..<min(width, Int(rect.maxX)) {
+                        var run = 0
+                        for y in Int(rect.minY)..<min(height, Int(rect.maxY)) {
+                            run = data[y * width + x] < 200 ? run + 1 : 0
+                            if run >= 15 { return true }
+                        }
                     }
+                    return false
                 }
-                if stray >= 20 { regions.append(placed) }
-            } else if (10...40).contains(rect.width), (10...40).contains(rect.height), rect.width / rect.height > 0.7, rect.width / rect.height < 1.4,
-                      labels.reduce(0, { covered, label in
-                          let overlap = label.intersection(placed)
-                          return covered + (overlap.isNull ? 0 : overlap.width * overlap.height)
-                      }) < placed.width * placed.height * 0.4 {
-                // A round or square shape the size of a graph node, such as a circle with no edges,
-                // around a small label; short text left on the page, such as "[1]", is not one.
-                nodes.append(placed)
-            } else if (3...10).contains(rect.width), (3...10).contains(rect.height), rect.width / rect.height > 0.7, rect.width / rect.height < 1.4,
-                      !labels.contains(where: { $0.intersects(placed) }) {
-                // A point of a scatter of points, as in a convex hull example.
-                dots.append(placed)
+                if rect.height >= 16 && rect.width >= 40 || rect.height >= 40 && (rect.width >= 16 || rect.width >= 10 && stroke()), count >= 12 {
+                    // Brackets, commas and descenders reaching past the boxes of lines of text are no
+                    // drawing: some of a drawing's ink stands clear of the text.
+                    let clear = textRects.filter { $0.intersects(placed) }.map { $0.offsetBy(dx: -bounds.minX, dy: -bounds.minY).insetBy(dx: -2, dy: -3.5) }
+                    var stray = 0
+                    for y in Int(rect.minY)..<min(height, Int(rect.maxY)) where stray < 20 {
+                        let point = CGFloat(height - y) - 0.5
+                        for x in Int(rect.minX)..<min(width, Int(rect.maxX)) where data[y * width + x] < 200
+                            && !clear.contains(where: { $0.contains(CGPoint(x: CGFloat(x) + 0.5, y: point)) }) {
+                            stray += 1
+                        }
+                    }
+                    if stray >= 20 { regions.append(placed) }
+                } else if (10...40).contains(rect.width), (10...40).contains(rect.height), rect.width / rect.height > 0.7, rect.width / rect.height < 1.4,
+                          labels.reduce(0, { covered, label in
+                              let overlap = label.intersection(placed)
+                              return covered + (overlap.isNull ? 0 : overlap.width * overlap.height)
+                          }) < placed.width * placed.height * 0.4 {
+                    // A round or square shape the size of a graph node, such as a circle with no edges,
+                    // around a small label; short text left on the page, such as "[1]", is not one.
+                    nodes.append(placed)
+                } else if (3...10).contains(rect.width), (3...10).contains(rect.height), rect.width / rect.height > 0.7, rect.width / rect.height < 1.4,
+                          !labels.contains(where: { $0.intersects(placed) }) {
+                    // A point of a scatter of points, as in a convex hull example.
+                    dots.append(placed)
+                }
             }
         }
         // Lone nodes belong to the drawing beside them; several close together are a drawing.
