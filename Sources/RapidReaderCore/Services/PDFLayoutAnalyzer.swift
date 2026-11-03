@@ -115,6 +115,7 @@ enum PDFLayoutAnalyzer {
                 found.insert(contentsOf: moved, at: index + 1)
             }
         }
+        found = placingRowLabels(found, on: page)
         found = joiningDetachedPowers(found, on: page)
         var respacedTokens = found.map { spacedVariables(in: $0.text) }
         if let pageInk {
@@ -2021,6 +2022,30 @@ enum PDFLayoutAnalyzer {
     /// PDFKit ends a line after a raised character, so "any integer between 0 and 2³²" and
     /// "− 1. For example, in C++" come as two lines of one row. The rest of the row joins the line
     /// it continues, and the sentence reads as one.
+    /// A label at the start of a row, as the "O(n)" before "A linear algorithm goes through …" in a list
+    /// of terms, can be listed far from its row; it is read just before the text beside it.
+    private static func placingRowLabels(_ found: [(selection: PDFSelection, text: String)], on page: PDFPage) -> [(selection: PDFSelection, text: String)] {
+        var found = found
+        let boxes = found.map { $0.selection.bounds(for: page) }
+        guard let left = boxes.map(\.minX).min() else { return found }
+        // Mathematics names the term, as "O(n)"; a reference's "[19]" or a run-in "Step 1." is read where it is.
+        for (index, box) in boxes.enumerated() where found[index].text.count <= 12 && box.minX <= left + 3 && box.height > 0
+            && found[index].text.range(of: #"^\p{L}\(.*\)$"#, options: .regularExpression) != nil {
+            guard let row = boxes.indices.first(where: { other in
+                other != index && boxes[other].minX > box.maxX && boxes[other].minX - box.maxX < 40
+                    && min(boxes[other].maxY, box.maxY) - max(boxes[other].minY, box.minY) > min(boxes[other].height, box.height) * 0.6
+                    && found[other].text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3
+            }), row != index + 1, abs(row - index) > 1 else { continue }
+            // Only when what it was read beside is not on its row.
+            let neighbour = index + 1 < boxes.count ? boxes[index + 1] : nil
+            if let neighbour, min(neighbour.maxY, box.maxY) - max(neighbour.minY, box.minY) > 0 { continue }
+            let label = found.remove(at: index)
+            found.insert(label, at: row > index ? row - 1 : row)
+            return placingRowLabels(found, on: page)
+        }
+        return found
+    }
+
     /// An exponent PDFKit set apart as a line of its own, as the "20" of "10²⁰" in a sentence of a web
     /// page, is raised onto its base; a stop PDFKit set apart after it joins too.
     private static func joiningDetachedPowers(_ found: [(selection: PDFSelection, text: String)], on page: PDFPage) -> [(selection: PDFSelection, text: String)] {
