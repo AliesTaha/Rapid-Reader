@@ -3175,8 +3175,13 @@ enum PDFLayoutAnalyzer {
     /// comes as two formulas of aligned rows; it is one picture, with any row PDFKit left as text.
     private static func mergeFormulaColumns(_ blocks: inout [Block], lines: inout [Line]) {
         func sameRow(_ a: CGRect, _ b: CGRect) -> Bool { min(a.maxY, b.maxY) - max(a.minY, b.minY) > min(a.height, b.height) * 0.5 }
-        for first in blocks.indices where blocks[first].kind == .formula && !blocks[first].rect.isNull {
-            for second in blocks.indices where second != first && blocks[second].kind == .formula && !blocks[second].rect.isNull {
+        // A column of bullet rows can read as a drawing of its bullets; it is a column all the same.
+        func listed(_ block: Int) -> Bool {
+            blocks[block].kind == .formula || blocks[block].kind == .image
+                && lines.filter({ $0.block == block }).allSatisfy { $0.text.hasPrefix("•") } && lines.contains { $0.block == block }
+        }
+        for first in blocks.indices where listed(first) && !blocks[first].rect.isNull {
+            for second in blocks.indices where second != first && listed(second) && !blocks[second].rect.isNull {
                 let left = lines.indices.filter { lines[$0].block == first }, right = lines.indices.filter { lines[$0].block == second }
                 // Columns of one list are set alike; a note's formula in the margin beside a display is not.
                 let widths = [blocks[first].rect.width, blocks[second].rect.width]
@@ -3189,6 +3194,7 @@ enum PDFLayoutAnalyzer {
                 let joined = lines.contains { $0.block == nil && $0.text.range(of: #"^(and|or)$"#, options: .regularExpression) != nil && gap.contains(CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)) }
                 guard paired.count * 10 >= min(left.count, right.count) * 8, !joined else { continue }
                 for index in right { lines[index].block = first }
+                blocks[first].kind = .formula
                 var rect = blocks[first].rect.union(blocks[second].rect)
                 blocks[second].rect = .null
                 // A row of the list PDFKit left as text, as "• value[ ] = 3", goes with it.
