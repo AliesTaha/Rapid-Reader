@@ -1816,9 +1816,11 @@ enum PDFLayoutAnalyzer {
                     let word = String(text.filter(\.isLetter))
                     // A function's name takes a subscript, as "logₖ(x)" or "sum_q".
                     let function = word.range(of: #"^(log|min|max|sum|lim)"#, options: .regularExpression) != nil
-                    if !lowered.isEmpty, function || !(lowered.contains { text[$0].isLetter } && !lowered.contains { text[$0].isNumber } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase))),
+                    // A comma between two indices, as in "aₖ,₁", is part of the index.
+                    let between = Set(text.indices.filter { $0 > 0 && $0 + 1 < text.count && text[$0] == "," && lowered.contains($0 - 1) && lowered.contains($0 + 1) })
+                    if !lowered.isEmpty, function || !(lowered.contains { text[$0].isLetter } && !lowered.contains { text[$0].isNumber } && word.count >= 3 && (isDictionaryWord(word.lowercased()) || word.allSatisfy(\.isLowercase) && word.allSatisfy(\.isASCII))),
                        lowered.allSatisfy({ index in
-                        index > 0 && (text[index - 1].isLetter || text[index - 1] == ")" || lowered.contains(index - 1) || text[index - 1].isNumber && lowered.contains(index - 1))
+                        index > 0 && (text[index - 1].isLetter || text[index - 1] == ")" || lowered.contains(index - 1) || between.contains(index - 1) || text[index - 1].isNumber && lowered.contains(index - 1))
                             && text[index - 1] != " " && !(lowered.contains(index - 1) == false && text[index - 1].isNumber)
                     }) {
                         var written = text
@@ -2172,6 +2174,26 @@ enum PDFLayoutAnalyzer {
                     tail = found[other].selection
                     continue joining
                 }
+                break
+            }
+        }
+        // An index set under an exponent, as the "m" of "x⁻¹ₘ", which PDFKit lists as "Let x−1" + "m be the
+        // inverse", starts left of where the exponent ends.
+        let raised: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "−": "⁻", "-": "⁻"]
+        let lowered: [Character: Character] = ["i": "ᵢ", "j": "ⱼ", "k": "ₖ", "m": "ₘ", "n": "ₙ", "p": "ₚ", "t": "ₜ"]
+        for index in found.indices where found[index].selection.numberOfTextRanges(on: page) == 1 {
+            guard let power = found[index].text.firstMatch(of: /\p{L}([−-]?\d{1,2})$/) else { continue }
+            let own = found[index].selection.range(at: 0, on: page)
+            guard own.length > power.output.1.count else { continue }
+            let start = box(NSMaxRange(own) - power.output.1.count - 1), end = found[index].selection.bounds(for: page).maxX
+            for other in found.indices where other != index && found[other].selection.numberOfTextRanges(on: page) == 1 {
+                guard let letter = found[other].text.first, lowered[letter] != nil, found[other].text.dropFirst().first == " " else { continue }
+                let first = box(found[other].selection.range(at: 0, on: page).location)
+                guard first.minX >= start.minX - 1, first.minX < end - 1, first.midY > start.minY, first.midY < start.maxY else { continue }
+                found[index].text = String(found[index].text.dropLast(power.output.1.count)) + String(power.output.1.compactMap { raised[$0] }) + String(lowered[letter]!)
+                found[index].text += String(found[other].text.dropFirst())
+                found[other].text = ""
+                respacedTokens[index].merge(respacedTokens[other]) { first, _ in first }
                 break
             }
         }

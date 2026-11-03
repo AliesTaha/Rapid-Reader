@@ -589,6 +589,8 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<=\s)=(?=\p{L}{2,})"#, with: "= ", options: .regularExpression)
                 // An arrow between steps stands apart from them, as "6 → 3 → 2".
                 .replacingOccurrences(of: #"(?<=[\p{L}\p{N})])→"#, with: " →", options: .regularExpression)
+                // An absolute value opened after a sign takes no space inside its bar, as "+ |y₁ − y₂|".
+                .replacingOccurrences(of: #"(?<=[+−=]\s)\|\s(?=[\p{L}\p{N}][^|\n]{0,30}\|)"#, with: "|", options: .regularExpression)
                 // A root after a slash takes no space, as "n/√n".
                 .replacingOccurrences(of: #"/\s(?=√)"#, with: "/", options: .regularExpression)
                 // A product of figures takes no space after its dot, as "2.4·10¹⁸".
