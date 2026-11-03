@@ -313,7 +313,10 @@ enum PDFLayoutAnalyzer {
         if blocks.contains(where: { $0.kind == .formula || $0.kind == .code }), let ink = InkMap(page: page, bounds: pageBounds) {
             let sentences = lines.filter { $0.block == nil && ($0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3
                 || $0.text.range(of: #"[A-Za-z]{5,}"#, options: .regularExpression) != nil) }.map(\.bounds)
-            let prose = lines.filter { $0.block == nil && $0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3 }.map(\.bounds)
+            let prose = lines.filter { $0.block == nil && $0.text.split(whereSeparator: \.isWhitespace).contains { token in
+                let letters = wordLetters(token).lowercased()
+                return letters.count >= 3 && letters.allSatisfy(\.isASCII) && isDictionaryWord(letters) && !mathWords.contains(letters)
+            } }.map(\.bounds)
             for index in blocks.indices where (blocks[index].kind == .formula || blocks[index].kind == .code) && !blocks[index].rect.isNull {
                 // Following the ink must not run along a line of prose.
                 let widened = ink.widened(blocks[index].rect)
@@ -410,11 +413,16 @@ enum PDFLayoutAnalyzer {
                         : line.bounds.maxX > block.rect.maxX + 12
                         ? CGRect(x: block.rect.maxX + 1, y: line.bounds.minY, width: line.bounds.maxX - block.rect.maxX - 1, height: line.bounds.height)
                         : CGRect.null
-                    guard !clear.isNull, let letters = pageInk.inkBounds(in: clear, excluding: []) else { continue }
+                    // Other lines' ink in its box, as a short line beside the display, is not its letters.
+                    let neighbours = lines.filter { $0.block != index && $0.bounds != line.bounds && !$0.text.isEmpty && $0.bounds.intersects(clear) && $0.bounds.height < line.bounds.height }.map(\.bounds)
+                    guard !clear.isNull, let letters = pageInk.inkBounds(in: clear, excluding: neighbours) else { continue }
                     // The edge goes where the letters begin, back out as far as the padding where a cut
                     // by the sentence's box took a raised mark of the display, as an exponent "n".
                     func free(_ strip: CGRect) -> Bool {
-                        !lines.contains { other in other.block != index && other.bounds != line.bounds && !other.text.isEmpty && other.bounds.intersects(strip) }
+                        !lines.contains { other in
+                            let overlap = other.bounds.intersection(strip)
+                            return other.block != index && other.bounds != line.bounds && !other.text.isEmpty && !overlap.isNull && overlap.width > 2
+                        }
                     }
                     if letters.minY >= labelSpan.maxY - 1, letters.minY < padded.maxY {
                         let edge = min(padded.maxY, max(letters.minY - 0.5, labelSpan.maxY))
@@ -449,7 +457,7 @@ enum PDFLayoutAnalyzer {
             let members = lines.filter { $0.block == index }
             if block.kind != .image, !members.isEmpty {
                 let span = members.reduce(CGRect.null) { $0.union($1.bounds) }
-                for line in lines where line.block != index && line.text.range(of: #"[A-Za-z]{5,}"#, options: .regularExpression) != nil {
+                for line in lines where line.block != index && line.text.range(of: #"[A-Za-z]{4,}"#, options: .regularExpression) != nil {
                     let overlap = min(line.bounds.maxY, crop.maxY) - max(line.bounds.minY, crop.minY)
                     guard overlap > min(line.bounds.height, span.height) * 0.3 else { continue }
                     if line.bounds.minX >= span.maxX, line.bounds.minX < crop.maxX {
@@ -487,7 +495,13 @@ enum PDFLayoutAnalyzer {
                 if !erased.isEmpty, let rest = pageInk.inkBounds(in: crop, excluding: erased) { crop = rest.insetBy(dx: -2, dy: -2).intersection(crop) }
             }
             let memberText = lines.filter { $0.block == index }.map(\.text).joined()
-            let hollow = block.kind != .image && !memberText.contains(where: { $0.isLetter || $0.isNumber })
+            // A sentence's line PDFKit took for a display, as "A = {2,5} and B = {4,5,6} is A ∪ B = {2,4,5,6}.",
+            // reads as it is written.
+            let memberLines = lines.filter { $0.block == index }
+            let spoken = block.kind == .formula && memberLines.count == 1 && memberLines[0].bounds.height <= lineHeight * 1.35
+                && memberLines[0].text.range(of: #"\s(and|is|or|then|so|where)\s"#, options: .regularExpression) != nil
+                && isPlainMath(memberLines[0].text.replacingOccurrences(of: #"\s(and|is|or|then|so|where)\s"#, with: " , ", options: .regularExpression))
+            let hollow = block.kind != .image && !memberText.contains(where: { $0.isLetter || $0.isNumber }) || spoken
             guard !hollow, let image = renderPNG(of: page, rect: crop, pageBounds: pageBounds, erasing: erased),
                   hasInk(image, crop: block.kind == .image ? nil : crop) else {
                 for line in lines.indices where lines[line].block == index { lines[line].block = nil }
@@ -879,8 +893,15 @@ enum PDFLayoutAnalyzer {
                 rect = CGRect(x: rect.minX, y: bottom, width: rect.width, height: top - bottom)
                 // A crop never ends inside a glyph.
                 if let ink = inlineInk { rect = ink.completingGlyphs(rect, left: expression.previousEnd, right: expression.nextStart) }
-                // Signs alone, as the "∪ ⋯ ∪" of "X₁ ∪ X₂ ∪ ⋯ ∪ Xₙ", read as they are.
+                // Signs alone, as the "∪ ⋯ ∪" of "X₁ ∪ X₂ ∪ ⋯ ∪ Xₙ", read as they are; so does mathematics
+                // that is plain text, as "f(i + k)" or "x & 1 = 0", on one row.
                 if !(chain?.text ?? String(lines[index].text[expression.range])).contains(where: { $0.isLetter || $0.isNumber }) { continue }
+                // It stands apart from the words around it, unlike the "s = 1" PDFKit ran into "m at".
+                let line = lines[index].text, range = expression.range
+                let apart = (range.lowerBound == line.startIndex || line[line.index(before: range.lowerBound)].isWhitespace)
+                    && (range.upperBound == line.endIndex || !line[range.upperBound].isLetter)
+                if chain == nil, apart, rect.height <= usualHeight * 1.35, isPlainMath(String(line[range])),
+                   let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
                 inlines.append(Inline(line: index, range: expression.range, rect: rect, text: chain?.text ?? String(lines[index].text[expression.range]),
                                       atStart: expression.atStart, atEnd: expression.atEnd, pieces: chain?.pieces ?? [], claim: chain?.claim))
             }
@@ -1692,7 +1713,9 @@ enum PDFLayoutAnalyzer {
                 if raised.contains(where: { index in
                     let before = index > 0 ? text[index - 1] : " "
                     return !raised.contains(index - 1) && (before == "/" || before.isNumber && index > 1 && text[index - 2] == ")" || "−+-".contains(before) && index > 1 && (text[index - 2].isLetter || text[index - 2].isNumber))
+                        // unless what follows the stroke sits on the baseline, as the "N" of "n³/N".
                         || index + 1 < text.count && !raised.contains(index + 1) && text[index + 1] == "/"
+                            && !(index + 2 < text.count && text[index + 2].isLetter && (bottoms[index + 2].map { abs($0 - level) <= 0.5 } ?? false))
                 }) { continue }
                 // Raised characters that open a token mark a footnote on the word they precede, as in
                 // "¹Cornell"; before a digit, as the "1" of "17M" would be, they are misread ink.
@@ -1785,8 +1808,10 @@ enum PDFLayoutAnalyzer {
             return rect.width > 0 ? rect : nil
         }
         var result: [String: String] = [:]
-        for position in tokens.indices.dropFirst() {
-            let previous = tokens[position - 1], next = tokens[position]
+        // A root can open the line, as the "√n" of "√n times" after a line break.
+        for position in tokens.indices {
+            let previous = position > 0 ? tokens[position - 1] : nil, next = tokens[position]
+            guard previous != nil || tokens.count > 1 else { continue }
             let sign = line[next].prefix { "−-".contains($0) }
             let radicand = sign + line[next].dropFirst(sign.count).prefix { $0.isLetter || $0.isNumber }
             guard (1...4).contains(radicand.count - sign.count), radicand.count <= 2 || !isDictionaryWord(String(radicand).lowercased()),
@@ -1801,7 +1826,8 @@ enum PDFLayoutAnalyzer {
                 let columns = [after.minX + 0.5, after.minX + share - 1.5].map { CGRect(x: $0, y: band.minY, width: 1, height: band.height) }
                 let highest = columns.map { ink.highestInk(in: $0) }, lowest = columns.map { ink.lowestInk(in: $0) }
                 let level = { (pair: [CGFloat?]) -> Bool in pair[0] != nil && pair[1] != nil && abs(pair[0]! - pair[1]!) <= 1 }
-                let tops = level(highest) ? highest : lowest
+                // Ink up to the band's top is the line above's.
+                let tops = level(highest) && !highest.contains(where: { ($0 ?? 0) >= band.maxY - 1 }) ? highest : lowest
                 guard let left = tops[0], let right = tops[1], abs(left - right) <= 1, left < band.maxY - 1 else { return nil }
                 return left
             }
@@ -1826,7 +1852,8 @@ enum PDFLayoutAnalyzer {
             let root = CGRect(x: after.minX - size * 0.9, y: baseline - size * 0.4, width: size * 0.9, height: left - baseline + size * 0.4 + 0.5)
             guard let low = ink.lowestInk(in: root), low <= baseline - size * 0.08,
                   let high = ink.highestInk(in: CGRect(x: after.minX - size * 0.9, y: root.minY, width: size * 0.9, height: root.height + 1)), high >= left - 1 else { continue }
-            let joined = line[previous].last.map { "([{⌊⌈".contains($0) } == true
+            let joined = previous.flatMap { line[$0].last }.map { "([{⌊⌈".contains($0) } == true
+            let lead = previous.map { String(line[$0]) + " " } ?? "", leadValue = previous.map { String(line[$0]) + (joined ? "" : " ") } ?? ""
             // The rule can run on over more tokens, as over "x² + y²"; they are the radicand, in brackets.
             var end = after.minX + share - 1
             while ink.inked(CGRect(x: end + 0.5, y: left - 1.5, width: 0.5, height: 2)) || ink.inked(CGRect(x: end + 1, y: left - 1.5, width: 0.5, height: 2)) { end += 0.5 }
@@ -1838,13 +1865,17 @@ enum PDFLayoutAnalyzer {
                 let tail = String(inner[inner.count - 1].reversed().prefix { ".,;:".contains($0) }.reversed())
                 let close = raised[inner[inner.count - 1]].map { String($0.dropLast(tail.count)) } ?? written(String(inner[inner.count - 1].dropLast(tail.count)))
                 inner = inner.dropLast().map(written) + [close]
-                let key = String(line[previous]) + " " + tokens[position...last].map { String(line[$0]) }.joined(separator: " ")
-                result[key] = String(line[previous]) + (joined ? "" : " ") + "√(" + inner.joined(separator: " ") + ")" + tail
+                // At the line's start the token after the radicand places it.
+                let trailing = previous == nil ? (last + 1 < tokens.count ? " " + String(line[tokens[last + 1]]) : nil) : ""
+                guard let trailing else { continue }
+                let key = lead + tokens[position...last].map { String(line[$0]) }.joined(separator: " ") + trailing
+                result[key] = leadValue + "√(" + inner.joined(separator: " ") + ")" + tail + trailing
                 continue
             }
-            let key = String(line[previous]) + " " + String(line[next])
+            let trailing = previous == nil ? " " + String(line[tokens[position + 1]]) : ""
+            let key = lead + String(line[next]) + trailing
             let radicandText = cut.map { String(line[next].prefix($0)) + " " + String(line[next].dropFirst($0)) } ?? written(String(line[next]))
-            result[key] = String(line[previous]) + (joined ? "" : " ") + "√" + radicandText
+            result[key] = leadValue + "√" + radicandText + trailing
         }
         var chained: (key: String, value: String, end: Int)?
         // Other signs drawn without a character, in the space between two tokens: "···" in
@@ -2048,6 +2079,35 @@ enum PDFLayoutAnalyzer {
         }
     }
 
+    /// Mathematics that reads as it is written: names, figures and common signs, with no index
+    /// left on the line as "x1", no accent and no Greek or mathematical letters.
+    static func isPlainMath(_ text: String) -> Bool {
+        let signs = Set(" (){}[],.;:=+−-×·<>≤≥≠∈∉∪∩⊂⊆&|/!'′…⋯~^∞∅⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻ⁿⁱᵏᵐˣ₀₁₂₃₄₅₆₇₈₉ₙᵢⱼₖₘ₋₊")
+        // Every name is a letter, a word or a function's name; "dmodel" hides an index.
+        let names = text.split(whereSeparator: { !$0.isLetter }).map { String($0).lowercased() }
+        return !text.isEmpty && text.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) || signs.contains($0) }
+            && text.range(of: #"\p{L}\d|\)\d|;\s*=|^\s*[=<>≤≥≈]"#, options: .regularExpression) == nil
+            && text.contains(where: { "=<>≤≥≠∈∉∪∩&|+−-×(".contains($0) })
+            && text.filter({ "([{".contains($0) }).count == text.filter({ ")]}".contains($0) }).count
+            && names.allSatisfy { $0.count == 1 || mathWords.contains($0) || ["and", "or", "if", "for", "mod", "then"].contains($0) }
+    }
+
+    /// Ink on one row: no glyph is raised, nor set small and low, as an exponent or an index is.
+    fileprivate static func isOneRow(_ rect: CGRect, on page: PDFPage, ink: InkMap) -> Bool {
+        guard let glyphs = ink.finer(page)?.glyphs(in: rect), glyphs.count >= 2 else { return false }
+        let heights = glyphs.map { $0.top - $0.bottom }.sorted()
+        let tall = heights[heights.count * 3 / 4]
+        let bodies = glyphs.filter { $0.top - $0.bottom >= tall * 0.6 }.map(\.bottom).sorted()
+        guard !bodies.isEmpty, tall > 0 else { return false }
+        let baseline = bodies[bodies.count / 2]
+        return !glyphs.contains { glyph in
+            let height = glyph.top - glyph.bottom
+            let raised = glyph.bottom > baseline + tall * 0.3 && height > tall * 0.25
+            let lowered = height >= tall * 0.4 && height < tall * 0.8 && glyph.bottom < baseline - tall * 0.12 && glyph.top < baseline + tall * 0.6
+            return raised || lowered
+        }
+    }
+
     private static func rewriteStackedPairs(_ found: inout [(selection: PDFSelection, text: String)], respacedTokens: inout [[String: String]],
                                             on page: PDFPage, ink: InkMap) {
         // A piece whose start went into a fraction above it, as the "2" of "1/2" before "|s₂ − s₁|d and 1",
@@ -2060,10 +2120,21 @@ enum PDFLayoutAnalyzer {
             let range = selection.range(at: 0, on: page)
             let leading = (raw as NSString).range(of: #"^\s*"#, options: .regularExpression).length + dropped[index, default: 0]
             let local = NSRange(token, in: text)
-            guard range.location != NSNotFound, let piece = page.selection(for: NSRange(location: range.location + leading + local.location, length: local.length)),
-                  (piece.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == String(text[token]) else { return nil }
-            let rect = piece.bounds(for: page)
-            return rect.width > 0 ? rect : nil
+            guard range.location != NSNotFound else { return nil }
+            // A ligature, as the "ﬃ" of "coefficient", is one character on the page and three in the
+            // text; a token that ends the line is found from the line's end instead.
+            var starts = [range.location + leading + local.location]
+            if token.upperBound == text.endIndex {
+                let trailing = raw.count - raw.replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression).count
+                starts.insert(NSMaxRange(range) - trailing - local.length, at: 0)
+            }
+            for start in starts {
+                guard let piece = page.selection(for: NSRange(location: start, length: local.length)),
+                      (piece.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == String(text[token]) else { continue }
+                let rect = piece.bounds(for: page)
+                if rect.width > 0 { return rect }
+            }
+            return nil
         }
         func operand(_ token: Substring) -> Bool {
             // Plain names and figures; Greek and accented mathematics is cropped with its sentence.
@@ -2072,12 +2143,24 @@ enum PDFLayoutAnalyzer {
         var removed: [Int] = []
         for index in found.indices {
             func worded(_ index: Int) -> Bool { found[index].text.split(whereSeparator: \.isWhitespace).contains(where: { $0.count >= 3 && isDictionaryWord(wordLetters($0).lowercased()) }) }
-            guard let last = found[index].text.ranges(of: /\S+/).last, operand(found[index].text[last]),
-                  let top = box(of: last, in: index) else { continue }
+            // A word PDFKit ran into the top, as "coefficientn" over "k", gives the top up. A line with
+            // a power the text lost, as the "3" of "(1/6)3", is cropped with the pair instead.
+            guard var last = found[index].text.ranges(of: /\S+/).last, found[index].text.range(of: #"\)\d"#, options: .regularExpression) == nil else { continue }
+            if !operand(found[index].text[last]) {
+                let token = found[index].text[last]
+                guard let cut = (1...2).first(where: { size in
+                    token.count > size + 3 && operand(token.suffix(size)) && isDictionaryWord(String(token.dropLast(size)).lowercased())
+                }) else { continue }
+                last = found[index].text.index(last.upperBound, offsetBy: -cut)..<last.upperBound
+            }
+            guard let top = box(of: last, in: index) else { continue }
             for other in found.indices where other != index && !removed.contains(other) {
                 // The sentence runs through one of the two pieces at least.
-                guard worded(index) || worded(other), let first = found[other].text.ranges(of: /\S+/).first, operand(found[other].text[first]),
-                      var bottom = box(of: first, in: other) else { continue }
+                // The piece under it can end the sentence, as "k.".
+                guard worded(index) || worded(other), let opening = found[other].text.ranges(of: /\S+/).first else { continue }
+                let core = found[other].text[opening].reversed().drop { ".,;:".contains($0) }.count
+                let first = opening.lowerBound..<found[other].text.index(opening.lowerBound, offsetBy: core)
+                guard core > 0, operand(found[other].text[first]), var bottom = box(of: first, in: other) else { continue }
                 var top = top, tall = top.height, inked = false
                 // PDFKit can give both the same box, as for the "1" over "2" of a fraction ending one
                 // line and opening the next; their ink tells them apart then.
@@ -2106,8 +2189,15 @@ enum PDFLayoutAnalyzer {
                 // Two figures one over the other in one box are a fraction, whose bar can touch the lower.
                 guard bracket || bar || inked else { continue }
                 let upper = String(found[index].text[last]), lower = String(found[other].text[first])
-                found[index].text = String(found[index].text[..<last.lowerBound]) + (bracket ? "C(\(upper), \(lower))" : "\(upper)/\(lower)")
-                let rest = found[other].text[first.upperBound...].trimmingCharacters(in: .whitespaces)
+                let before = String(found[index].text[..<last.lowerBound])
+                let gap = before.last.map { $0.isLetter } == true ? " " : ""
+                found[index].text = before + gap + (bracket ? "C(\(upper), \(lower))" : "\(upper)/\(lower)")
+                var rest = found[other].text[first.upperBound...].trimmingCharacters(in: .whitespaces)
+                let stop = rest.prefix { ".,;:".contains($0) }
+                if !stop.isEmpty, opening.upperBound == found[other].text.index(first.upperBound, offsetBy: stop.count) {
+                    found[index].text += stop
+                    rest = String(rest.dropFirst(stop.count)).trimmingCharacters(in: .whitespaces)
+                }
                 if rest.isEmpty { removed.append(other) } else {
                     dropped[other, default: 0] += (found[other].text as NSString).length - (rest as NSString).length
                     found[other].text = rest
@@ -2556,7 +2646,9 @@ enum PDFLayoutAnalyzer {
             }
             seen.formUnion(cluster)
             // An operator, not a footnote's mark as the "∗" after an author's name.
-            guard cluster.count >= 2, cluster.contains(where: { lines[$0].text.range(of: #"[=≤≥≠≈<>+−×÷/∑∏∫√∈∪∩]"#, options: .regularExpression) != nil }),
+            // A function applied to indexed names, as "mex({g1, g2,..., gn})", set alone is a display too.
+            let applied = cluster.count == 1 && lines[start].text.range(of: #"^\p{L}{2,}\(.*\p{L}\d.*\)[.,;]?$"#, options: .regularExpression) != nil
+            guard cluster.count >= 2 || applied, applied || cluster.contains(where: { lines[$0].text.range(of: #"[=≤≥≠≈<>+−×÷/∑∏∫√∈∪∩]"#, options: .regularExpression) != nil }),
                   !cluster.contains(where: { lines[$0].text.contains("@") }) else { continue }
             // Nothing else stands beside it on its rows: a display is set off from the text.
             let span = cluster.reduce(CGRect.null) { $0.union(lines[$1].bounds) }

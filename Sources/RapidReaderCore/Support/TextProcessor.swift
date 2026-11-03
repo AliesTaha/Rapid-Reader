@@ -12,6 +12,9 @@ public enum TextProcessor {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .joined(separator: "\n")
             .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+            // A dash set apart between words, as "shortest-path – SPFA", would be dropped as a lone
+            // sign; it joins the words instead.
+            .replacingOccurrences(of: #"(?<=[\p{L}\p{N})”"’]) ?\n?([–—]) ?\n?(?=[\p{L}\p{N}(“"‘])"#, with: "$1", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -208,7 +211,7 @@ public enum TextProcessor {
         if token.count >= 2, token.allSatisfy({ "+-=<>!&|".contains($0) }) { return true }
         return token.unicodeScalars.contains { scalar in
             CharacterSet.alphanumerics.contains(scalar) || scalar.properties.generalCategory == .mathSymbol
-                || "∅∞&%#√∑∏∫∂∇∀∃⋯/@*\\·□⊏⊐⊓⊔".unicodeScalars.contains(scalar)
+                || "∅∞&%#√∑∏∫∂∇∀∃⋯/@*\\·□⊏⊐⊓⊔^~".unicodeScalars.contains(scalar)
         }
     }
 

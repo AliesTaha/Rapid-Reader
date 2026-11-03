@@ -161,6 +161,8 @@ public enum PDFTextExtractor {
                 guard fragment(tokens[start]) else { start += 1; continue }
                 var end = start
                 while end + 1 < tokens.count, letters(tokens[end]) == tokens[end], fragment(tokens[end + 1]) { end += 1 }
+                // Names before a relation, as the "m at s" of "m at s = 1", are mathematics.
+                if end + 1 < tokens.count, ["=", "<", ">", "≤", "≥", "≠", "≈", "∈"].contains(tokens[end + 1]) { start = end + 1; continue }
                 // The longest run from here that spells a word.
                 for last in stride(from: end, to: start, by: -1) {
                     let pieces = tokens[start...last].map(letters)
@@ -333,6 +335,19 @@ public enum PDFTextExtractor {
 
     /// Joins words split across lines. "exam-" + "ple" loses its hyphen, but a compound such as
     /// "two-" + "dimensional" keeps it: the hyphen stays unless the joined word is in the dictionary.
+    /// A list of indexed names ends in the same name's index after its ellipsis: "a₁ + a₂ + ⋯ + an"
+    /// is "a₁ + a₂ + ⋯ + aₙ", which PDFKit's text and the dictionary's "an" hide.
+    static func endingIndexedLists(_ text: String) -> String {
+        guard let pattern = try? NSRegularExpression(pattern: #"(\p{Ll})[₀-₉](?:\s?[,+−]\s?\1[₀-₉])*\s?[,+−]?\s?(?:⋯|\.\.\.|…)\s?[,+−]?\s?\1([nkmij])(?![\p{L}\p{N}])"#) else { return text }
+        let small: [String: String] = ["n": "ₙ", "k": "ₖ", "m": "ₘ", "i": "ᵢ", "j": "ⱼ"]
+        var result = text
+        for match in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let index = Range(match.range(at: 2), in: result), let written = small[String(result[index])] else { continue }
+            result.replaceSubrange(index, with: written)
+        }
+        return result
+    }
+
     static func dehyphenated(_ text: String) -> String {
         guard let pattern = try? NSRegularExpression(pattern: #"(\p{L}+)-\n(\p{Ll}[\p{L}ﬀﬁﬂﬃﬄ]*)"#) else { return text }
         var result = text
@@ -500,6 +515,8 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<![\p{L}])log([a-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
                 .replacingOccurrences(of: #"·\s?·\s?·(\s(?=[)\]}]))?"#, with: "⋯", options: .regularExpression)
+                // A negation sign PDFKit set against the word before, as "are¬ (negation)", stands apart.
+                .replacingOccurrences(of: #"(?<=\p{L}[,;]?)¬"#, with: " ¬", options: .regularExpression)
                 // A web address broken after a slash or a dot goes on without a space.
                 .replacingOccurrences(of: #"(https?://\S*[/.])\n(?=\w)"#, with: "$1", options: .regularExpression)
                 // A range of pages broken after its dash, as "321–" + "322", is one.
@@ -510,7 +527,7 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #",−\s(?=\p{L})"#, with: ", −", options: .regularExpression)
                 .replacingOccurrences(of: "ﬃ", with: "ffi").replacingOccurrences(of: "ﬄ", with: "ffl")
                 .replacingOccurrences(of: "ﬀ", with: "ff").replacingOccurrences(of: "ﬁ", with: "fi").replacingOccurrences(of: "ﬂ", with: "fl")
-            return TextProcessor.normalizedText(rejoiningSplitWords(dehyphenated(attachingAccents(composingNameAccents(separatingIdentifiers(joined))))))
+            return TextProcessor.normalizedText(endingIndexedLists(rejoiningSplitWords(dehyphenated(attachingAccents(composingNameAccents(separatingIdentifiers(joined)))))))
         }
     }
     /// A name's accent that PDFKit set apart before its letter, as "K˝ onig", "Sta´ nczyk" or
