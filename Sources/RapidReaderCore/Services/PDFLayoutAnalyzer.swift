@@ -120,6 +120,7 @@ enum PDFLayoutAnalyzer {
             for index in found.indices { respacedTokens[index].merge(raised[index]) { first, _ in first } }
             for index in found.indices { respacedTokens[index].merge(radicals(in: found[index].text, selection: found[index].selection, page: page, ink: pageInk)) { first, _ in first } }
             rejoinRaisedSplits(&found, respacedTokens: &respacedTokens, raised: raised, on: page)
+            rewriteStackedPairs(&found, respacedTokens: &respacedTokens, on: page, ink: pageInk)
         }
         var lines: [Line] = found.map { selection, text in
             // Table-of-contents entries end in dot leaders and are prose, whatever else they hold.
@@ -1682,6 +1683,60 @@ enum PDFLayoutAnalyzer {
             respacedTokens.remove(at: next)
             raised.remove(at: next)
             if next < index { index -= 1 }
+        }
+    }
+
+    /// A binomial or a fraction set in a sentence, as "There are a total of (2n over n) ways",
+    /// comes as two pieces of one row: the line ends on the top, "…total of 2n", and the next piece
+    /// starts with the bottom, "n ways…", set under it; the top's piece holds a word of the sentence. Tall brackets beside them make a binomial,
+    /// "C(2n, n)"; a bar between them a fraction, "1/2".
+    private static func rewriteStackedPairs(_ found: inout [(selection: PDFSelection, text: String)], respacedTokens: inout [[String: String]],
+                                            on page: PDFPage, ink: InkMap) {
+        func box(of token: Range<String.Index>, in index: Int) -> CGRect? {
+            let (selection, text) = found[index]
+            guard selection.numberOfTextRanges(on: page) == 1, let raw = selection.string, raw.trimmingCharacters(in: .whitespacesAndNewlines) == text else { return nil }
+            let range = selection.range(at: 0, on: page)
+            let leading = (raw as NSString).range(of: #"^\s*"#, options: .regularExpression).length
+            let local = NSRange(token, in: text)
+            guard range.location != NSNotFound, let piece = page.selection(for: NSRange(location: range.location + leading + local.location, length: local.length)),
+                  (piece.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == String(text[token]) else { return nil }
+            let rect = piece.bounds(for: page)
+            return rect.width > 0 ? rect : nil
+        }
+        func operand(_ token: Substring) -> Bool {
+            token.range(of: #"^[\p{L}\p{N}+−-]{1,6}$"#, options: .regularExpression) != nil && !(token.count >= 2 && token.allSatisfy(\.isLetter) && isDictionaryWord(token.lowercased()))
+        }
+        var removed: [Int] = []
+        for index in found.indices {
+            guard let last = found[index].text.ranges(of: /\S+/).last, operand(found[index].text[last]),
+                  found[index].text.split(whereSeparator: \.isWhitespace).contains(where: { $0.count >= 3 && isDictionaryWord(wordLetters($0).lowercased()) }),
+                  let top = box(of: last, in: index) else { continue }
+            for other in found.indices where other != index && !removed.contains(other) {
+                guard let first = found[other].text.ranges(of: /\S+/).first, operand(found[other].text[first]), let bottom = box(of: first, in: other) else { continue }
+                // Set under the top, on the same row of the page.
+                let overlap = min(top.maxX, bottom.maxX) - max(top.minX, bottom.minX)
+                guard overlap >= min(top.width, bottom.width) * 0.5, bottom.midY < top.midY - 2, top.midY - bottom.midY < top.height * 0.8 else { continue }
+                let span = CGRect(x: min(top.minX, bottom.minX), y: bottom.minY, width: max(top.maxX, bottom.maxX) - min(top.minX, bottom.minX), height: top.maxY - bottom.minY)
+                // A bracket as tall as both, just before them, or a rule between them.
+                let bracket = ink.glyphColumns(in: CGRect(x: span.minX - 6, y: span.minY, width: 6, height: span.height)).contains { run in
+                    let column = CGRect(x: run.lowerBound, y: span.minY, width: run.upperBound - run.lowerBound, height: span.height)
+                    guard run.lowerBound < span.minX, run.upperBound <= span.minX + 1.5, run.upperBound - run.lowerBound <= 4,
+                          let high = ink.highestInk(in: column), let low = ink.lowestInk(in: column) else { return false }
+                    return high - low >= span.height * 0.65
+                }
+                let middle = CGRect(x: span.minX, y: bottom.midY, width: span.width, height: max(0, top.midY - bottom.midY))
+                let bar = ink.rowBands(in: middle).contains { $0.upperBound - $0.lowerBound <= 1.5 } && ink.glyphColumns(in: middle).contains { $0.upperBound - $0.lowerBound >= span.width * 0.7 }
+                guard bracket || bar else { continue }
+                let upper = String(found[index].text[last]), lower = String(found[other].text[first])
+                found[index].text = String(found[index].text[..<last.lowerBound]) + (bracket ? "C(\(upper), \(lower))" : "\(upper)/\(lower)")
+                let rest = found[other].text[first.upperBound...].trimmingCharacters(in: .whitespaces)
+                if rest.isEmpty { removed.append(other) } else { found[other].text = rest }
+                break
+            }
+        }
+        for index in removed.sorted(by: >) {
+            found.remove(at: index)
+            respacedTokens.remove(at: index)
         }
     }
 
