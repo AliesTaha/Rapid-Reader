@@ -1093,6 +1093,19 @@ enum PDFLayoutAnalyzer {
                   !isDictionaryWord(source.substring(with: tokens[run.lowerBound - 1])) {
                 run = (run.lowerBound - 1)..<run.upperBound
             }
+            // An expression that closes a quoted event it did not open, as the "4”) = 1/6" of
+            // "P(”the outcome is 4”) = 1/6", starts where that bracket opens; when words lie between,
+            // the whole stays text, as it reads well.
+            func balance(_ range: Range<Int>) -> Int {
+                tokens[range].map { source.substring(with: $0) }.joined().reduce(0) { $0 + ("([{".contains($1) ? 1 : ")]}".contains($1) ? -1 : 0) }
+            }
+            if balance(run) < 0, tokens[run].map({ source.substring(with: $0) }).joined().range(of: #"[”"]\)"#, options: .regularExpression) != nil {
+                var start = run.lowerBound
+                while start > max(0, run.lowerBound - 6), balance(start..<run.upperBound) < 0 { start -= 1 }
+                guard balance(start..<run.upperBound) >= 0 else { continue }
+                if (start..<run.lowerBound).filter(plain).count >= 2 { continue }
+                run = start..<run.upperBound
+            }
             // An operator written as a word, as the "mod" of "75 mod 17 = 7", joins its operands.
             if run.lowerBound >= 2, source.substring(with: tokens[run.lowerBound - 1]) == "mod",
                source.substring(with: tokens[run.lowerBound - 2]).range(of: #"^[(\[]?[\p{L}\p{N}]{1,3}[)\]]?$"#, options: .regularExpression) != nil {
