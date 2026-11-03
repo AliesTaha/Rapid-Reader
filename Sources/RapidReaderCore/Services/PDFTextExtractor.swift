@@ -20,6 +20,8 @@ public enum PDFTextExtractor {
                 let index = document.index(for: page)
                 // Cross-reference labels such as "[eq:ipw-estimand]" are no part of a title.
                 let title = title.replacingOccurrences(of: #"\[[a-z]+:[^\]]*\]"#, with: "", options: .regularExpression)
+                    // An apostrophe in a word is the curly one the text prints, as in "Burnside’s lemma".
+                    .replacingOccurrences(of: #"(?<=\p{L})'(?=\p{L})"#, with: "’", options: .regularExpression)
                 if index != NSNotFound { chapters.append((index, title)) }
             }
             for index in 0..<outline.numberOfChildren {
@@ -27,6 +29,16 @@ public enum PDFTextExtractor {
             }
         }
         if let outline = document.outlineRoot { visit(outline) }
+        // A document without an outline, as a web page printed to PDF, has its headings found by the layout instead.
+        if chapters.isEmpty {
+            let heading = PDFLayoutAnalyzer.headingPrint
+            for (page, text) in pages.enumerated() {
+                for line in text.components(separatedBy: "\n") where line.hasPrefix(heading) {
+                    let title = String(line.dropFirst(heading.count)).trimmingCharacters(in: .whitespaces)
+                    if !title.isEmpty { chapters.append((page, title)) }
+                }
+            }
+        }
         // Outline order is kept among entries on one page; each finds its own heading line below.
         chapters = chapters.enumerated().sorted { ($0.element.page, $0.offset) < ($1.element.page, $1.offset) }.map(\.element)
         if let first = chapters.first, first.page > 0 { chapters.insert((0, "Opening"), at: 0) }

@@ -1691,7 +1691,17 @@ enum PDFLayoutAnalyzer {
             // PDFKit sometimes places a token over another part of the line; it should sit about
             // where its share of the characters puts it.
             let share = CGFloat(line.distance(from: line.startIndex, to: token.lowerBound) + text.count / 2) / CGFloat(line.count)
-            guard abs(tokenBox.midX - (box.minX + box.width * share)) <= box.width * 0.2 else { continue }
+            // A line's box can run on past its last word, to a display beside it; its characters give its extent.
+            let firstBox = page.selection(for: NSRange(location: lineRange.location + leading, length: 1))?.bounds(for: page)
+            let lastBox = page.selection(for: NSRange(location: lineRange.location + leading + (line as NSString).length - 1, length: 1))?.bounds(for: page)
+            // The last character's own box can be the stretched one; it is about as wide as a letter.
+            var extent = box
+            if let first = firstBox, let last = lastBox {
+                let letter: CGFloat = min(last.width, max(first.width, size * 0.6))
+                let span = first.union(CGRect(x: last.minX, y: last.minY, width: letter, height: last.height))
+                if span.width > box.width * 0.3, span.width <= box.width + 1 { extent = span }
+            }
+            guard abs(tokenBox.midX - (extent.minX + extent.width * share)) <= extent.width * 0.2 else { continue }
             // The bar of a root over the token, as over "x² + y²", is no part of its glyphs.
             let tokenBand = ink.withoutOverbar(CGRect(x: tokenBox.minX - 0.5, y: band.minY, width: tokenBox.width + 1, height: band.height))
             var glyphs = ink.glyphColumns(in: tokenBand)
@@ -2190,9 +2200,8 @@ enum PDFLayoutAnalyzer {
         func box(_ at: Int) -> CGRect { page.selection(for: NSRange(location: at, length: 1))?.bounds(for: page) ?? .null }
         for index in found.indices where !found[index].text.isEmpty {
             // A joined piece can end in a name of its own, as "1 = (x′" after "p′".
-            var tail = found[index].selection
-            joining: while found[index].text.hasSuffix("′"), tail.numberOfTextRanges(on: page) == 1 {
-                let own = tail.range(at: 0, on: page)
+            joining: while found[index].text.hasSuffix("′"), found[index].selection.numberOfTextRanges(on: page) == 1 {
+                let own = found[index].selection.range(at: 0, on: page)
                 guard own.length > 0 else { break }
                 let prime = box(NSMaxRange(own) - 1)
                 for other in found.indices where other != index && !found[other].text.isEmpty && found[other].selection.numberOfTextRanges(on: page) == 1 {
@@ -2200,13 +2209,15 @@ enum PDFLayoutAnalyzer {
                     let range = found[other].selection.range(at: 0, on: page)
                     let first = box(range.location)
                     // Just after the name on its row, and followed by a relation or a comma, as an index is.
+                    // The joined piece holds the characters of both, which say where its letters are.
                     guard (-3...4).contains(first.minX - prime.maxX), first.midY > prime.minY, first.midY < prime.maxY,
-                          found[other].text.dropFirst().first.map({ " =,)".contains($0) }) ?? true else { continue }
-                    let rest = String(found[other].text.dropFirst())
-                    found[index].text += String(small[digit]!) + rest
+                          found[other].text.dropFirst().first.map({ " =,)".contains($0) }) ?? true,
+                          (0...2).contains(range.location - NSMaxRange(own)),
+                          let joined = page.selection(for: NSRange(location: own.location, length: NSMaxRange(range) - own.location)) else { continue }
+                    found[index].text += String(small[digit]!) + String(found[other].text.dropFirst())
+                    found[index].selection = joined
                     found[other].text = ""
                     respacedTokens[index].merge(respacedTokens[other]) { first, _ in first }
-                    tail = found[other].selection
                     continue joining
                 }
                 break
