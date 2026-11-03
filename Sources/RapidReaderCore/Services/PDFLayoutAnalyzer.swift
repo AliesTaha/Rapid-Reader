@@ -252,6 +252,27 @@ enum PDFLayoutAnalyzer {
             if !rest.isNull { blocks[block].rect = rest }
         }
         releaseLeadIns(&blocks, lines: &lines)
+        // Captions under a picture, as "Euclidean distance   Manhattan distance" under two drawings, are
+        // the picture's: a few plain words just under it, narrower than the text column, with no stop.
+        let column = lines.filter { $0.block == nil && $0.text.count >= 40 }.map(\.bounds.width).sorted()
+        if let width = column.isEmpty ? nil : column[column.count / 2] {
+            let height = typicalLineHeight(lines.map(\.bounds))
+            for index in lines.indices where lines[index].block == nil && !lines[index].heading && !lines[index].text.isEmpty {
+                let bounds = lines[index].bounds, tokens = lines[index].text.split(whereSeparator: \.isWhitespace)
+                // It starts with a capital and does not go on from the line before, as a wrapped caption does.
+                let previous = lines[..<index].last { !$0.text.isEmpty }
+                let following = lines[(index + 1)...].first { !$0.text.isEmpty }
+                let goesOn = previous.map { $0.block == nil && $0.text.range(of: #"[.!?:]["”’)]?$"#, options: .regularExpression) == nil } ?? false
+                    || following.map { $0.block == nil && $0.text.first?.isLowercase == true } ?? false
+                guard (2...6).contains(tokens.count), tokens.allSatisfy({ $0.allSatisfy { $0.isASCII && $0.isLetter } }), tokens[0].first?.isUppercase == true, !goesOn,
+                      bounds.width < width * 0.85,
+                      let image = blocks.indices.first(where: { blocks[$0].kind == .image && !blocks[$0].rect.isNull
+                          && blocks[$0].rect.minY - bounds.maxY >= -1 && blocks[$0].rect.minY - bounds.maxY < height * 1.6
+                          && bounds.minX >= blocks[$0].rect.minX - 10 && bounds.maxX <= blocks[$0].rect.maxX + 10 }) else { continue }
+                lines[index].block = image
+                blocks[image].rect = blocks[image].rect.union(bounds)
+            }
+        }
         mergeFormulaColumns(&blocks, lines: &lines)
         gatherOperatorTables(&blocks, lines: &lines)
         // The rest of a display's row that PDFKit set apart, as ",2nm,n² + m²)," after "(n² − m²", is
@@ -476,8 +497,17 @@ enum PDFLayoutAnalyzer {
             // A drawing the edge would cut, as the circle around a node "𝑋1" or around the "5" of a
             // tree whose box PDFKit gave by its labels, is taken whole.
             if block.kind == .formula || block.kind == .image, let pageInk {
-                let others = lines.filter { $0.block != index && !$0.text.isEmpty }.map(\.bounds)
-                let grown = pageInk.grownVertically(pageInk.completingGlyphs(crop, left: nil, right: nil), limit: 6)
+                // Other lines are where their own letters are: a box can stand far taller than its ink.
+                let others = lines.filter { $0.block != index && !$0.text.isEmpty }.map { line -> CGRect in
+                    guard line.bounds.intersects(crop.insetBy(dx: -8, dy: -8)), let letters = pageInk.inkBounds(in: line.bounds, excluding: [crop]) else { return line.bounds }
+                    return letters
+                }
+                var grown = pageInk.grownVertically(pageInk.completingGlyphs(crop, left: nil, right: nil), limit: 6)
+                // Never into the letters of a line above or below.
+                for other in others where other.minX < grown.maxX && other.maxX > grown.minX {
+                    if other.minY >= crop.maxY - 0.5, other.minY < grown.maxY { grown.size.height = max(crop.maxY, other.minY - 0.5) - grown.minY }
+                    if other.maxY <= crop.minY + 0.5, other.maxY > grown.minY { let top = grown.maxY; grown.origin.y = min(crop.minY, other.maxY + 0.5); grown.size.height = top - grown.minY }
+                }
                 // Only into space no other line uses, so the next display is not half taken.
                 let strips = [CGRect(x: grown.minX, y: crop.maxY, width: grown.width, height: max(0, grown.maxY - crop.maxY)),
                               CGRect(x: grown.minX, y: grown.minY, width: grown.width, height: max(0, crop.minY - grown.minY)),
@@ -503,8 +533,8 @@ enum PDFLayoutAnalyzer {
             // reads as it is written.
             let memberLines = lines.filter { $0.block == index }
             let spoken = block.kind == .formula && memberLines.count == 1 && memberLines[0].bounds.height <= lineHeight * 1.35
-                && memberLines[0].text.range(of: #"\s(and|is|or|then|so|where)\s"#, options: .regularExpression) != nil
-                && isPlainMath(memberLines[0].text.replacingOccurrences(of: #"\s(and|is|or|then|so|where)\s"#, with: " , ", options: .regularExpression))
+                && memberLines[0].text.range(of: #"(^|\s)(and|is|or|then|so|where)\s"#, options: .regularExpression) != nil
+                && isPlainMath(memberLines[0].text.replacingOccurrences(of: #"(^|\s)(and|is|or|then|so|where)\s"#, with: " , ", options: .regularExpression))
             let hollow = block.kind != .image && !memberText.contains(where: { $0.isLetter || $0.isNumber }) || spoken
             guard !hollow, let image = renderPNG(of: page, rect: crop, pageBounds: pageBounds, erasing: erased),
                   hasInk(image, crop: block.kind == .image ? nil : crop) else {
@@ -2719,7 +2749,7 @@ enum PDFLayoutAnalyzer {
         func piece(_ line: Line) -> Bool {
             let tokens = line.text.split(whereSeparator: \.isWhitespace)
             // An index set small under a sign, as the "A⊂S" under "Σ", is a piece too.
-            return (line.kind == nil || line.kind == .formula) && (!line.small || line.text.count <= 6) && !line.heading && !tokens.isEmpty && tokens.count <= 6
+            return (line.kind == nil || line.kind == .formula) && (!line.small || line.text.count <= 6) && !line.heading && !tokens.isEmpty && tokens.count <= 10
                 && line.bounds.minX > left + 40 && line.bounds.maxX < right - 40
                 && !tokens.contains { token in
                     // A name indexed or applied, as "value[A]" or "sum(S)", is no word.
@@ -2741,12 +2771,16 @@ enum PDFLayoutAnalyzer {
             seen.formUnion(cluster)
             // An operator, not a footnote's mark as the "∗" after an author's name.
             // A function applied to indexed names, as "mex({g1, g2,..., gn})", set alone is a display too.
-            let applied = cluster.count == 1 && lines[start].text.range(of: #"^\p{L}{2,}\(.*\p{L}\d.*\)[.,;]?$"#, options: .regularExpression) != nil
+            let applied = cluster.count == 1 && (lines[start].text.range(of: #"^\p{L}{2,}\(.*\p{L}\d.*\)[.,;]?$"#, options: .regularExpression) != nil
+                // or an equation whose powers or roots the text lost, as "(5− 2)2 + (2− 1)2 = 10".
+                || lines[start].text.contains("=") && lines[start].text.range(of: #"\)\d"#, options: .regularExpression) != nil)
             guard cluster.count >= 2 || applied, applied || cluster.contains(where: { lines[$0].text.range(of: #"[=≤≥≠≈<>+−×÷/∑∏∫√∈∪∩]"#, options: .regularExpression) != nil }),
                   !cluster.contains(where: { lines[$0].text.contains("@") }) else { continue }
             // Nothing else stands beside it on its rows: a display is set off from the text.
             let span = cluster.reduce(CGRect.null) { $0.union(lines[$1].bounds) }
-            guard !lines.indices.contains(where: { !cluster.contains($0) && !lines[$0].text.isEmpty && lines[$0].bounds.intersects(span.insetBy(dx: -4, dy: 1)) }) else { continue }
+            // A line beside it has its centre on the display's rows; a tall box from the line above only reaches in.
+            guard !lines.indices.contains(where: { !cluster.contains($0) && !lines[$0].text.isEmpty && lines[$0].bounds.intersects(span.insetBy(dx: -4, dy: 1))
+                && lines[$0].bounds.midY > span.minY + 2 && lines[$0].bounds.midY < span.maxY - 2 }) else { continue }
             for index in cluster { lines[index].kind = .formula }
         }
     }
@@ -3588,9 +3622,11 @@ enum PDFLayoutAnalyzer {
             let referencing = members.contains { lines[$0].text.range(of: #"\((Equation|Figure|Table|Section|Chapter|Theorem|Lemma|Proposition|Corollary|Definition|Assumption|Example|Appendix)\s*\d"#, options: .regularExpression) != nil }
             let inline = referencing || members.allSatisfy { member in
                 let bounds = lines[member].bounds
+                // On the sentence's row: their centres close, not just a tall box reaching over.
                 return sentences.contains { sentence in
                     min(sentence.maxY, bounds.maxY) - max(sentence.minY, bounds.minY) > min(sentence.height, bounds.height) * 0.3
                         && max(sentence.minX, bounds.minX) - min(sentence.maxX, bounds.maxX) < 16
+                        && abs(sentence.midY - bounds.midY) < min(sentence.height, bounds.height) * 0.45
                 }
             }
             guard inline else { continue }
