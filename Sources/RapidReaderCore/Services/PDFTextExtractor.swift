@@ -335,6 +335,18 @@ public enum PDFTextExtractor {
 
     /// Joins words split across lines. "exam-" + "ple" loses its hyphen, but a compound such as
     /// "two-" + "dimensional" keeps it: the hyphen stays unless the joined word is in the dictionary.
+    /// A power with a decimal point, as "n².⁸⁰⁷³⁵", reads as "n squared point…"; it is written "n^2.80735".
+    static func writingDecimalPowers(_ text: String) -> String {
+        guard let pattern = try? NSRegularExpression(pattern: #"[⁰¹²³⁴⁵⁶⁷⁸⁹]+\.[⁰¹²³⁴⁵⁶⁷⁸⁹]+"#) else { return text }
+        let plain: [Character: Character] = ["⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9"]
+        var result = text
+        for match in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            result.replaceSubrange(range, with: "^" + String(result[range].map { plain[$0] ?? $0 }))
+        }
+        return result
+    }
+
     /// A list of indexed names ends in the same name's index after its ellipsis: "a₁ + a₂ + ⋯ + an"
     /// is "a₁ + a₂ + ⋯ + aₙ", which PDFKit's text and the dictionary's "an" hide.
     static func endingIndexedLists(_ text: String) -> String {
@@ -489,6 +501,9 @@ public enum PDFTextExtractor {
                 guard listed, index > 0 else { continue }
                 // A list that ended with its own stop, or a heading after it, closes it.
                 if line.hasPrefix(PDFLayoutAnalyzer.headingPrint) || page[index - 1].range(of: #"[.!?]["”’)]?$"#, options: .regularExpression) != nil {
+                    // The last item before a heading ends with a stop, as "… Manual [58]".
+                    if line.hasPrefix(PDFLayoutAnalyzer.headingPrint), page[index - 1].range(of: #"[\p{L}\p{N})\]}]$"#, options: .regularExpression) != nil,
+                       !PDFLayoutAnalyzer.isMarker(page[index - 1].trimmingCharacters(in: .whitespaces)) { page[index - 1] += "." }
                     listed = false
                     continue
                 }
@@ -497,8 +512,9 @@ public enum PDFTextExtractor {
                 if line.first?.isUppercase == true {
                     // An item that wraps, as a book's title over "Contest Training Manual", goes on
                     // after a capitalised word or a small word such as "the" or "to".
+                    // the item goes on, and the list with it.
+                    if page[index - 1].range(of: #"\b(and|or|the|a|an|to|of|in|on|for|from|with|by|at)$|\b\p{Lu}\p{Ll}+$"#, options: .regularExpression) != nil { continue }
                     if page[index - 1].range(of: #"[\p{L}\p{N})\]}’”⁰¹²³⁴⁵⁶⁷⁸⁹]$"#, options: .regularExpression) != nil,
-                       page[index - 1].range(of: #"\b(and|or|the|a|an|to|of|in|on|for|from|with|by|at)$|\b\p{Lu}\p{Ll}+$"#, options: .regularExpression) == nil,
                        !PDFLayoutAnalyzer.isMarker(page[index - 1].trimmingCharacters(in: .whitespaces)) {
                         page[index - 1] += "."
                     }
@@ -523,6 +539,9 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?m)(?<!\#(PDFLayoutAnalyzer.markerPrefix)\d{1,5})(?<!\band|\bor)(?<=[\p{L}\p{N}’”⁰¹²³⁴⁵⁶⁷⁸⁹]|[\p{L}\p{N}][)\]}]|^•\s[()\[\]{}]{2,16})\n(?=•\s)"#, with: ";\n", options: .regularExpression)
                 // So do numbered items, as "(1) horizontal segment begins" + "(2) horizontal segment ends".
                 .replacingOccurrences(of: #"(?m)^(\(\d{1,2}\)\s[^\n]*[\p{L}\p{N}])\n(?=\(\d{1,2}\)\s)"#, with: "$1;\n", options: .regularExpression)
+                // and the last ends where a sentence follows it.
+                .replacingOccurrences(of: #"(?m)^(\(\d{1,2}\)\s[^\n]*[\p{L}\p{N}])\n(?=\p{Lu})"#, with: "$1.\n", options: .regularExpression)
+
                 // An overbar PDFKit set apart, as in "complement¯ A" or "A ∩¯ B", goes on the name of
                 // one letter after it, "Ā"; with no letter after, as in "E¯ [", on the one before.
                 .replacingOccurrences(of: #"(?<=[\p{L}\p{N}∩∪])¯\s?(?!\#(PDFLayoutAnalyzer.markerPrefix))([\x{0370}-\x{03FF}]|\p{L}(?![\p{L}(]))"#, with: " $1\u{0304}", options: .regularExpression)
@@ -560,7 +579,7 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #",−\s(?=\p{L})"#, with: ", −", options: .regularExpression)
                 .replacingOccurrences(of: "ﬃ", with: "ffi").replacingOccurrences(of: "ﬄ", with: "ffl")
                 .replacingOccurrences(of: "ﬀ", with: "ff").replacingOccurrences(of: "ﬁ", with: "fi").replacingOccurrences(of: "ﬂ", with: "fl")
-            return TextProcessor.normalizedText(endingIndexedLists(rejoiningSplitWords(dehyphenated(attachingAccents(composingNameAccents(separatingIdentifiers(joined)))))))
+            return TextProcessor.normalizedText(writingDecimalPowers(endingIndexedLists(rejoiningSplitWords(dehyphenated(attachingAccents(composingNameAccents(separatingIdentifiers(joined))))))))
         }
     }
     /// A name's accent that PDFKit set apart before its letter, as "K˝ onig", "Sta´ nczyk" or

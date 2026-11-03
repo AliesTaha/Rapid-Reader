@@ -4210,7 +4210,18 @@ enum PDFLayoutAnalyzer {
                     }
                     return false
                 }
-                if rect.height >= 16 && rect.width >= 40 || rect.height >= 40 && (rect.width >= 16 || rect.width >= 10 && stroke()), count >= 12 {
+                // A column a node wide, as a chain of circled nodes, holds ink outside every line of text;
+                // a column of page numbers is all text.
+                func drawnOutsideText() -> Bool {
+                    let boxes = labels.filter { $0.intersects(placed) }.map { $0.offsetBy(dx: -bounds.minX, dy: -bounds.minY).insetBy(dx: -1, dy: -1) }
+                    var outside = 0
+                    for y in Int(rect.minY)..<min(height, Int(rect.maxY)) where outside < 30 {
+                        let point = CGFloat(height - y) - 0.5
+                        for x in Int(rect.minX)..<min(width, Int(rect.maxX)) where data[y * width + x] < 200 && !boxes.contains(where: { $0.contains(CGPoint(x: CGFloat(x) + 0.5, y: point)) }) { outside += 1 }
+                    }
+                    return outside >= 30
+                }
+                if rect.height >= 16 && rect.width >= 40 || rect.height >= 40 && (rect.width >= 16 || rect.width >= 12 && drawnOutsideText() || rect.width >= 10 && stroke()), count >= 12 {
                     // Brackets, commas and descenders reaching past the boxes of lines of text are no
                     // drawing: some of a drawing's ink stands clear of the text.
                     let clear = textRects.filter { $0.intersects(placed) }.map { $0.offsetBy(dx: -bounds.minX, dy: -bounds.minY).insetBy(dx: -2, dy: -3.5) }
