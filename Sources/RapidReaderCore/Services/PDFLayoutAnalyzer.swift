@@ -228,6 +228,7 @@ enum PDFLayoutAnalyzer {
         attachTableHeaders(&blocks, lines: &lines)
         absorbEnclosedRows(&blocks, lines: &lines)
         settleFigureLabels(&blocks, lines: &lines)
+        mergeFormulaColumns(&blocks, lines: &lines)
         gatherOperatorTables(&blocks, lines: &lines)
         // A wordless label lying partly over a drawing, such as a figure's own title, is part of it.
         for index in lines.indices where lines[index].block == nil && lines[index].kind == nil
@@ -2182,11 +2183,13 @@ enum PDFLayoutAnalyzer {
         let height = typicalLineHeight(lines.map(\.bounds))
         func piece(_ line: Line) -> Bool {
             let tokens = line.text.split(whereSeparator: \.isWhitespace)
-            return line.kind == nil && !line.small && !line.heading && !tokens.isEmpty && tokens.count <= 6
+            // An index set small under a sign, as the "A⊂S" under "Σ", is a piece too.
+            return (line.kind == nil || line.kind == .formula) && (!line.small || line.text.count <= 6) && !line.heading && !tokens.isEmpty && tokens.count <= 6
                 && line.bounds.minX > left + 40 && line.bounds.maxX < right - 40
                 && !tokens.contains { token in
+                    // A name indexed or applied, as "value[A]" or "sum(S)", is no word.
                     let letters = wordLetters(token).lowercased()
-                    return letters.count >= 3 && !mathWords.contains(letters) && isDictionaryWord(letters)
+                    return letters.count >= 3 && !mathWords.contains(letters) && isDictionaryWord(letters) && token.range(of: #"^\p{L}+[\[(]"#, options: .regularExpression) == nil
                 }
         }
         let candidates = lines.indices.filter { piece(lines[$0]) }
@@ -2504,6 +2507,35 @@ enum PDFLayoutAnalyzer {
             }
             blocks.append(Block(kind: .table, rect: rect, firstLine: members.min()))
             position = next
+        }
+    }
+
+    /// A list of values set in two columns, as "• value[{0}] = 1" beside "• value[{0,2}] = 1",
+    /// comes as two formulas of aligned rows; it is one picture, with any row PDFKit left as text.
+    private static func mergeFormulaColumns(_ blocks: inout [Block], lines: inout [Line]) {
+        func sameRow(_ a: CGRect, _ b: CGRect) -> Bool { min(a.maxY, b.maxY) - max(a.minY, b.minY) > min(a.height, b.height) * 0.5 }
+        for first in blocks.indices where blocks[first].kind == .formula && !blocks[first].rect.isNull {
+            for second in blocks.indices where second != first && blocks[second].kind == .formula && !blocks[second].rect.isNull {
+                let left = lines.indices.filter { lines[$0].block == first }, right = lines.indices.filter { lines[$0].block == second }
+                // Columns of one list are set alike; a note's formula in the margin beside a display is not.
+                let widths = [blocks[first].rect.width, blocks[second].rect.width]
+                guard left.count >= 3, right.count >= 3, blocks[first].rect.maxX < blocks[second].rect.minX, blocks[second].rect.minX - blocks[first].rect.maxX < 150,
+                      widths.min()! * 2 >= widths.max()!, !(left + right).contains(where: { lines[$0].small }) else { continue }
+                let paired = left.filter { l in right.contains { sameRow(lines[l].bounds, lines[$0].bounds) } }
+                guard paired.count * 10 >= min(left.count, right.count) * 8 else { continue }
+                for index in right { lines[index].block = first }
+                var rect = blocks[first].rect.union(blocks[second].rect)
+                blocks[second].rect = .null
+                // A row of the list PDFKit left as text, as "• value[ ] = 3", goes with it.
+                for index in lines.indices where lines[index].block == nil && rect.insetBy(dx: -4, dy: -14).contains(CGPoint(x: lines[index].bounds.midX, y: lines[index].bounds.midY))
+                    && lines[index].text.count <= 30 && abs(lines[index].bounds.minX - rect.minX) < 4
+                    && !lines[index].text.split(whereSeparator: \.isWhitespace).contains(where: { $0.count >= 3 && isDictionaryWord(wordLetters($0).lowercased()) && $0.range(of: #"^\p{L}+[\[(]"#, options: .regularExpression) == nil }) {
+                    lines[index].block = first
+                    rect = rect.union(lines[index].bounds)
+                }
+                blocks[first].rect = rect
+                blocks[first].firstLine = lines.indices.first { lines[$0].block == first }
+            }
         }
     }
 
