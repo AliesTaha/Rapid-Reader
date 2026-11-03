@@ -2618,7 +2618,7 @@ enum PDFLayoutAnalyzer {
                 let tokens = lines[index].text.split(whereSeparator: \.isWhitespace)
                 // Prose has words; a row of mathematics only names and the words of a case, as "mod"
                 // or "n is even".
-                let cases: Set<String> = ["if", "is", "odd", "even", "otherwise", "and", "for", "all", "else"]
+                let cases: Set<String> = ["if", "is", "odd", "even", "otherwise", "and", "for", "all", "else", "true", "false"]
                 guard !tokens.isEmpty, tokens.first?.first?.isUppercase != true || tokens.count == 1, tokens.allSatisfy({ token in
                     let letters = wordLetters(token).lowercased()
                     return !isWord(token) || letters.count < 3 || mathWords.contains(letters) || cases.contains(letters) || !isDictionaryWord(letters)
@@ -2639,7 +2639,9 @@ enum PDFLayoutAnalyzer {
                             }
                     }
                     let under = bounds.minY < rect.minY && bounds.maxY > rect.minY - height * 0.6
-                        && bounds.minX >= rect.minX - 12 && bounds.maxX <= rect.maxX + 12 && lines[index].text.contains("=")
+                        && bounds.minX >= rect.minX - 24 && bounds.maxX <= rect.maxX + 12
+                        // An equation, or the next row of a table of values ending where the row above does.
+                        && (lines[index].text.contains("=") && bounds.minX >= rect.minX - 12 || tokens.count >= 5 && abs(bounds.maxX - rect.maxX) < 6)
                     guard enclosed || under, !sentenceRow else { continue }
                     if let own = lines[index].block { blocks[own].rect = .null }
                     lines[index].block = block
