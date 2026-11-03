@@ -4372,7 +4372,33 @@ enum PDFLayoutAnalyzer {
             while blank < order.count, !rows[order[blank]] { blank += 1 }
             return blank - index >= gap && blank < order.count ? blank : 0
         }
-        let top = edgeCut(Array(0..<height)), bottom = edgeCut(Array((0..<height).reversed()))
+        // At the foot, a speck of the line below can stand just inside the padding, as the dot of an
+        // "i"; at the top a speck so set is more often an accent, and stays.
+        func footCut(_ order: [Int]) -> Int {
+            var start = 0
+            while start < order.count, start <= Int(2.5 * scale), !rows[order[start]] { start += 1 }
+            guard start > 0, start <= Int(2.5 * scale) else { return edgeCut(order) }
+            var index = start
+            while index < order.count, rows[order[index]] { index += 1 }
+            guard index - start <= Int(2 * scale) else { return 0 }
+            // A speck, not a rule: its ink spans a small part of the width.
+            var columns = Set<Int>()
+            for row in order[start..<index] {
+                let base = row * stride
+                for x in 0..<width where Int(data[base + x * 4]) + Int(data[base + x * 4 + 1]) + Int(data[base + x * 4 + 2]) < 600 { columns.insert(x) }
+            }
+            guard columns.count * 4 <= width, let low = columns.min(), let high = columns.max(), (high - low) * 4 <= width else { return 0 }
+            var blank = index
+            while blank < order.count, !rows[order[blank]] { blank += 1 }
+            return blank - index >= max(2, Int(0.6 * scale)) && blank < order.count ? blank : 0
+        }
+        let top = edgeCut(Array(0..<height))
+        // Two specks can lie there, as the tops of the next line's letters and a dot over one of them.
+        var bottom = footCut(Array((0..<height).reversed()))
+        if bottom > 0 {
+            let again = footCut(Array((0..<(height - bottom)).reversed()))
+            if again > 0, height - bottom - again > Int(6 * scale) { bottom += again }
+        }
         // At the sides, a narrow strip of ink touching the very edge is part of a neighbouring
         // character; the padding keeps the crop's own ink off the edge.
         func inkedColumn(_ column: Int) -> Bool {
