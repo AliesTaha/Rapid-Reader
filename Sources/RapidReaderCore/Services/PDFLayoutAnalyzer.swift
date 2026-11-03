@@ -4425,6 +4425,25 @@ enum PDFLayoutAnalyzer {
                           !labels.contains(where: { $0.intersects(placed) }) {
                     // A point of a scatter of points, as in a convex hull example.
                     dots.append(placed)
+                } else if min(rect.width, rect.height) <= 10, max(rect.width, rect.height) <= 60,
+                          !labels.contains(where: { $0.intersects(placed) }) {
+                    // Points set one above the other join into one thin shape; it is several points
+                    // when blank cells part it into pieces each the size of a point, near round on the coarse grid.
+                    let upright = rect.height > rect.width
+                    let steps = Set(cells.map { upright ? $0.y : $0.x }).sorted()
+                    var runs: [[Int]] = []
+                    for step in steps {
+                        if let last = runs.last?.last, step == last + 1 { runs[runs.count - 1].append(step) } else { runs.append([step]) }
+                    }
+                    let points = runs.map { run -> CGRect in
+                        let part = cells.filter { run.contains(upright ? $0.y : $0.x) }
+                        let left = part.map(\.x).min()!, right = part.map(\.x).max()!, top = part.map(\.y).min()!, foot = part.map(\.y).max()!
+                        let shape = CGRect(x: left * cell, y: top * cell, width: (right - left + 1) * cell, height: (foot - top + 1) * cell)
+                        return CGRect(x: bounds.minX + shape.minX, y: bounds.minY + CGFloat(height) - shape.maxY, width: shape.width, height: shape.height)
+                    }
+                    if runs.count >= 2, points.allSatisfy({ (3...10).contains($0.width) && (3...10).contains($0.height) && $0.width / $0.height >= 0.6 && $0.width / $0.height <= 1.6 }) {
+                        dots.append(contentsOf: points)
+                    }
                 }
             }
         }

@@ -603,6 +603,10 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<=[\p{L}\p{N})])→"#, with: " →", options: .regularExpression)
                 // An absolute value opened after a sign takes no space inside its bar, as "+ |y₁ − y₂|".
                 .replacingOccurrences(of: #"(?<=[+−=]\s)\|\s(?=[\p{L}\p{N}][^|\n]{0,30}\|)"#, with: "|", options: .regularExpression)
+                // A range takes no space after its dots, as "s[0...p − 1]" or "0...c".
+                .replacingOccurrences(of: #"(?<=(?:^|[\s\[(])[\p{L}\p{N}]{1,3}\.\.\.)\s(?=[\p{L}\p{N}](?!\p{L}))"#, with: "", options: .regularExpression)
+                // A factorial stands apart from the sign after it, as "3! − 4".
+                .replacingOccurrences(of: #"(?<=[\p{L}\p{N}]!)(?=[−+=])"#, with: " ", options: .regularExpression)
                 // A root after a slash takes no space, as "n/√n".
                 .replacingOccurrences(of: #"/\s(?=√)"#, with: "/", options: .regularExpression)
                 // A product of figures takes no space after its dot, as "2.4·10¹⁸".
