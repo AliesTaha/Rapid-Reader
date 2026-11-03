@@ -443,6 +443,7 @@ public enum PDFTextExtractor {
         }
         droppingMarginContents(&kept)
         kept = kept.map(tidyingListings)
+        kept = kept.map(joiningNoteTails)
         kept = kept.map(raisingFootnoteMarks)
         movingNotes(&kept)
         keepingNotesInSection(&kept)
@@ -559,6 +560,25 @@ public enum PDFTextExtractor {
             result = result.replacingOccurrences(of: #"\b\#(token)\b"#, with: name + " " + rest, options: .regularExpression)
         }
         return result
+    }
+
+    /// The last line of a footnote, as "[49]." or "1962 [23, 70].", can be read in the body's size;
+    /// after a note's line that does not finish its sentence, a short line that ends one is the note's.
+    static func joiningNoteTails(_ page: [String]) -> [String] {
+        let mark = PDFLayoutAnalyzer.smallPrint
+        var lines = page
+        var index = 0
+        while index + 1 < lines.count {
+            let note = lines[index], next = lines[index + 1]
+            if note.hasPrefix(mark), !next.hasPrefix(mark), !PDFLayoutAnalyzer.isMarker(next), !next.hasPrefix(PDFLayoutAnalyzer.headingPrint),
+               note.range(of: #"[.!?]["”’)]?$"#, options: .regularExpression) == nil, next.count <= 40,
+               next.range(of: #"[.!?]["”’)]?$"#, options: .regularExpression) != nil, next.first.map({ !$0.isUppercase }) == true {
+                lines[index] = note + " " + next
+                lines.remove(at: index + 1)
+            }
+            index += 1
+        }
+        return lines
     }
 
     /// A reference's label on a line of its own, as "[12]", joins the entry it labels; on a
@@ -696,10 +716,24 @@ public enum PDFTextExtractor {
             var index = 0
             while index < pages[page].count {
                 let line = pages[page][index]
-                guard line.hasPrefix(small), index == 0 || !pages[page][index - 1].hasPrefix(small),
-                      let mark = line.dropFirst(small.count).first, "¹²³⁴⁵⁶⁷⁸⁹".contains(mark) else { index += 1; continue }
+                guard line.hasPrefix(small), let mark = line.dropFirst(small.count).first, "¹²³⁴⁵⁶⁷⁸⁹".contains(mark) else { index += 1; continue }
+                // A run is one note: the next mark starts the next.
                 var end = index + 1
-                while end < pages[page].count, pages[page][end].hasPrefix(small) { end += 1 }
+                while end < pages[page].count, pages[page][end].hasPrefix(small),
+                      !(pages[page][end].dropFirst(small.count).first.map { "¹²³⁴⁵⁶⁷⁸⁹".contains($0) } ?? false) { end += 1 }
+                // A mark further down the page, as in the first line under the next heading, is the note's:
+                // it goes after the sentence that line ends, before any heading.
+                if let later = ((end)..<pages[page].count).first(where: { !pages[page][$0].hasPrefix(small) && !pages[page][$0].hasPrefix(heading)
+                    && pages[page][$0].range(of: "(?<=\\p{Ll}{2}[.,:;)]{0,1})" + String(mark) + "(?![\\p{N}\\p{L}(])", options: .regularExpression) != nil }) {
+                    var stop = later
+                    while stop + 1 < pages[page].count, pages[page][stop].range(of: #"[.!?:]["”’)]?$"#, options: .regularExpression) == nil,
+                          !pages[page][stop + 1].hasPrefix(heading), !PDFLayoutAnalyzer.isMarker(pages[page][stop + 1]) { stop += 1 }
+                    let run = Array(pages[page][index..<end])
+                    pages[page].insert(contentsOf: run, at: stop + 1)
+                    pages[page].removeSubrange(index..<end)
+                    index = stop + 1
+                    continue
+                }
                 // Where the mark is: this page above the note, or the page before.
                 var reference: (page: Int, line: Int)?
                 for candidate in [page, page - 1] where candidate >= 0 {

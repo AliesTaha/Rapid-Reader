@@ -672,12 +672,8 @@ enum PDFLayoutAnalyzer {
                     let before = run.first.map { $0 > 0 ? tokens[$0 - 1].rect.maxX : nil } ?? nil
                     let after = run.last.map { $0 + 1 < tokens.count ? tokens[$0 + 1].rect.minX : nil } ?? nil
                     rect = ink.grownVertically(rect, limit: lineHeight * 0.3)
-                    var ceiling = others.filter { $0.midY > band.midY }.map { boundary($0, above: true, centre: rect.midY) }.min() ?? rect.maxY
-                    var floor = others.filter { $0.midY < band.midY }.map { boundary($0, above: false, centre: rect.midY) }.max() ?? rect.minY
-                    // An exponent reaching past halfway to the line above, as the "6" of "84⁶", is kept
-                    // where blank space parts it from that line.
-                    if rect.maxY > ceiling, rect.maxY - ceiling < usualHeight * 0.4, ink.blankRow(above: true, of: rect) { ceiling = rect.maxY }
-                    if rect.minY < floor, floor - rect.minY < usualHeight * 0.4, ink.blankRow(above: false, of: rect) { floor = rect.minY }
+                    let ceiling = others.filter { $0.midY > band.midY }.map { boundary($0, above: true, centre: rect.midY) }.min() ?? rect.maxY
+                    let floor = others.filter { $0.midY < band.midY }.map { boundary($0, above: false, centre: rect.midY) }.max() ?? rect.minY
                     rect = CGRect(x: rect.minX, y: max(rect.minY, floor), width: rect.width, height: min(rect.maxY, ceiling) - max(rect.minY, floor))
                     guard rect.height >= 4 else { complete = false; break }
                     rect = ink.completingGlyphs(rect, left: before.map { $0 + 0.5 }, right: after.map { $0 - 0.5 })
@@ -911,12 +907,33 @@ enum PDFLayoutAnalyzer {
                 // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first
                 // blank row, a little way at most.
                 if let ink = inlineInk {
+                    // Ink of another line's letters, as the tops of the line under it, is never taken:
+                    // the crop stops short of it.
+                    func foreign(_ strip: CGRect) -> [CGRect] {
+                        // The expression's own characters, as a raised "6", own their ink.
+                        let mine: [CGRect] = ([index] + (chain?.pieces ?? [])).flatMap { member -> [CGRect] in
+                            guard found[member].selection.numberOfTextRanges(on: page) == 1 else { return [] }
+                            let range = found[member].selection.range(at: 0, on: page)
+                            return (range.location..<NSMaxRange(range)).map { page.characterBounds(at: $0) }.filter { $0.intersects(strip) }
+                        }
+                        return lines.indices.flatMap { other -> [CGRect] in
+                            guard other != index, !(chain?.pieces.contains(other) ?? false), lines[other].bounds.intersects(strip),
+                                  found[other].selection.numberOfTextRanges(on: page) == 1 else { return [] }
+                            let range = found[other].selection.range(at: 0, on: page)
+                            return (range.location..<NSMaxRange(range)).compactMap { character -> CGRect? in
+                                let shared = page.characterBounds(at: character).intersection(strip)
+                                guard !shared.isNull, shared.width >= 1, shared.height >= 0.5, let ink = ink.inkBounds(in: shared, excluding: mine) else { return nil }
+                                return ink
+                            }
+                        }
+                    }
                     var grown = rect
-                    while !ink.blankRow(above: true, of: grown), grown.maxY - rect.maxY < usualHeight * 0.4 { grown.size.height += 0.5 }
-                    if ink.blankRow(above: true, of: grown) { rect = grown }
-                    grown = rect
-                    while !ink.blankRow(above: false, of: grown), rect.minY - grown.minY < usualHeight * 0.4 { grown.origin.y -= 0.5; grown.size.height += 0.5 }
-                    if ink.blankRow(above: false, of: grown) { rect = grown }
+                    while !ink.blankRow(above: true, of: grown), grown.maxY - rect.maxY < usualHeight * 0.25 { grown.size.height += 0.5 }
+                    if grown.maxY > rect.maxY {
+                        let others = foreign(CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: grown.maxY - rect.maxY))
+                        let limit = others.map(\.minY).min().map { $0 - 0.3 } ?? grown.maxY
+                        if ink.blankRow(above: true, of: grown), others.isEmpty, limit > rect.maxY { rect.size.height = limit - rect.minY }
+                    }
                 }
                 inlines.append(Inline(line: index, range: expression.range, rect: rect, text: chain?.text ?? String(lines[index].text[expression.range]),
                                       atStart: expression.atStart, atEnd: expression.atEnd, pieces: chain?.pieces ?? [], claim: chain?.claim))
@@ -1476,7 +1493,7 @@ enum PDFLayoutAnalyzer {
             // Letters Unicode has no small form of, as the "q" of "sum_q" or the "A" of "S_A", are
             // written as an index after an underscore.
             .merging(Dictionary(uniqueKeysWithValues: "bcdfgqwyzABCDEFGHIJKLMNOPQRSTUVWXYZ".map { ($0, Character(UnicodeScalar(0xE100 + Int($0.asciiValue!))!)) })) { first, _ in first }
-        let superscripts: [Character: Character] = ["/": "ᐟ", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+        let superscripts: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
             "+": "⁺", "−": "⁻", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "k": "ᵏ", "m": "ᵐ", "x": "ˣ", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "t": "ᵗ",
             "A": "ᴬ", "B": "ᴮ", "D": "ᴰ", "E": "ᴱ", "G": "ᴳ", "H": "ᴴ", "I": "ᴵ", "J": "ᴶ", "K": "ᴷ", "L": "ᴸ", "M": "ᴹ", "N": "ᴺ", "O": "ᴼ", "P": "ᴾ", "R": "ᴿ", "T": "ᵀ", "U": "ᵁ", "V": "ⱽ", "W": "ᵂ"]
         // The line's baseline is where most of its glyphs end; subscripts and old-style figures
@@ -1769,11 +1786,13 @@ enum PDFLayoutAnalyzer {
                     for index in lifted { written[index] = superscripts[text[index]]! }
                 } else {
                     // More than one sign goes in brackets: "x^(ϕ(m)−1)".
-                    let exponent = String(text[lifted.min()!...])
+                    // The exponent ends with its last raised character, as the "n/2" of "O(2^(n/2))".
+                    let raisedEnd = text.indices.contains(lifted.max()! + 1) && (lifted.allSatisfy { superscripts[text[$0]] != nil || "/".contains(text[$0]) }) ? lifted.max()! : text.count - 1
+                    let exponent = String(text[lifted.min()!...raisedEnd]), after = String(text[(raisedEnd + 1)...])
                     // An ordinal's letters, as the "th" of "99th", are no exponent.
                     // One that opens with a sign, as the "−s" of "e^(−s′)", goes on past the token.
-                    if exponent.range(of: #"^(st|nd|rd|th)[.,;:]?$|^[−+-]"#, options: .regularExpression) != nil { continue }
-                    written = Array(text[..<lifted.min()!]) + Array("^" + (exponent.count == 1 || exponent.hasPrefix("(") && exponent.hasSuffix(")") || exponent.hasPrefix("|") && exponent.hasSuffix("|") ? exponent : "(" + exponent + ")"))
+                    if (exponent + after).range(of: #"^(st|nd|rd|th)[.,;:]?$|^[−+-]"#, options: .regularExpression) != nil { continue }
+                    written = Array(text[..<lifted.min()!]) + Array("^" + (exponent.count == 1 || exponent.hasPrefix("(") && exponent.hasSuffix(")") || exponent.hasPrefix("|") && exponent.hasSuffix("|") ? exponent : "(" + exponent + ")")) + Array(after)
                 }
                 // An index before the power, as the "2" of "t₂u²", is lowered as well.
                 if written.count == text.count {
