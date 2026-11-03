@@ -2586,6 +2586,17 @@ enum PDFLayoutAnalyzer {
                 blocks[block].rect = rect.union(row)
                 blocks[other].rect = .null
             }
+            // A node standing apart beside the drawing, as the "5" over "A" left of a Huffman tree,
+            // is part of it: a label of a few characters within the drawing's height.
+            for index in lines.indices where lines[index].block == nil && !lines[index].text.isEmpty && lines[index].text.count <= 3 && !lines[index].small {
+                let bounds = lines[index].bounds, rect = blocks[block].rect
+                let gap = bounds.maxX < rect.minX ? rect.minX - bounds.maxX : bounds.minX - rect.maxX
+                guard bounds.midY > rect.minY, bounds.midY < rect.maxY, gap > 0, gap < 60,
+                      !lines.indices.contains(where: { $0 != index && lines[$0].block != block && !lines[$0].text.isEmpty
+                        && lines[$0].bounds.intersects(CGRect(x: min(bounds.maxX, rect.maxX), y: bounds.minY, width: gap, height: bounds.height)) && lines[$0].text.count > 3 }) else { continue }
+                lines[index].block = block
+                blocks[block].rect = rect.union(bounds)
+            }
             for index in lines.indices where lines[index].block == nil && !lines[index].heading && !lines[index].text.isEmpty {
                 let bounds = lines[index].bounds, rect = blocks[block].rect
                 let tokens = lines[index].text.split(whereSeparator: \.isWhitespace)
