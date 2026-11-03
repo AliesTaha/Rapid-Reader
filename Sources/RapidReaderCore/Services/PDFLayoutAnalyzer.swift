@@ -1164,6 +1164,12 @@ enum PDFLayoutAnalyzer {
                       text.unicodeScalars.contains(where: { isMathSymbol($0) || (0x0391...0x03C9).contains($0.value) || (0x1D400...0x1D7FF).contains($0.value) || "ˆ¯˜′∥".unicodeScalars.contains($0) })
                 else { continue }
                 let own = lines[index].bounds
+                // Plain mathematics that opens or closes a row of prose beside it, as the "−2⁶³...2⁶³" PDFKit
+                // split from "− 1 or about…", is read with it.
+                if isPlainMath(text), lines.contains(where: { other in
+                    other.block == nil && sameRow(other.bounds, own) && (other.bounds.minX - own.maxX >= -1 && other.bounds.minX - own.maxX < 6 || own.minX - other.bounds.maxX >= -1 && own.minX - other.bounds.maxX < 6)
+                        && other.text.split(whereSeparator: \.isWhitespace).filter({ isProseToken(String($0)) }).count >= 2
+                }) { continue }
                 // A line a picture already shows, as the last line of a display repeated by PDFKit, goes.
                 if blocks.contains(where: { block in
                     let overlap = block.rect.insetBy(dx: -2, dy: -2).intersection(own)
@@ -1658,7 +1664,12 @@ enum PDFLayoutAnalyzer {
             let higher = tally.filter { $0.key > mode.key + 0.75 && $0.key <= mode.key + 2.5 && $0.value >= max(3, (mode.value + 1) / 2) }
             return higher.max(by: { ($0.value, $0.key) < ($1.value, $1.key) })?.key ?? mode.key
         }
-        guard var baseline = level(in: box) else { return [:] }
+        // A piece too short to show its baseline, as the "−2⁶³" PDFKit split from "...2⁶³ − 1", sits on
+        // the baseline of the row around it.
+        func rowLevel(_ box: CGRect) -> CGFloat? {
+            level(in: box) ?? level(in: box.insetBy(dx: -min(box.height, 14) * 3, dy: 0).intersection(page.bounds(for: .cropBox)))
+        }
+        guard var baseline = rowLevel(box) else { return [:] }
         // Glyphs are measured between the lowest a descender reaches and the highest an exponent
         // does, at the size most of the line is set in; the lines above and below can reach into
         // the line's box.
@@ -1674,7 +1685,7 @@ enum PDFLayoutAnalyzer {
         if box.height > size * 1.6, let own = ink.rowBands(in: box).filter({ $0.lowerBound > box.minY + 0.5 && $0.upperBound < box.maxY - 0.5 }).max(by: { $0.upperBound - $0.lowerBound < $1.upperBound - $1.lowerBound }),
            own.upperBound - own.lowerBound > size * 0.5 {
             box = CGRect(x: box.minX, y: own.lowerBound - 1, width: box.width, height: own.upperBound - own.lowerBound + 2)
-            guard let found = level(in: box) else { return [:] }
+            guard let found = rowLevel(box) else { return [:] }
             baseline = found
         }
         let low = max(box.minY, baseline - size * 0.3), high = min(box.maxY, baseline + size * 0.95)

@@ -254,7 +254,8 @@ public enum PDFTextExtractor {
                 } == true
                 if mathematical, String(characters[next..<min(characters.count, next + marker.count)]) != marker {
                     let between = characters[(index + 1)..<next].contains("\n") ? "\n" : " "
-                    if current.last.map({ $0 != " " && $0 != "\n" }) == true { current += " " }
+                    // It stands apart from the word before, but not from a bracket it opens, as in "Reg(π̂β)".
+                    if current.last.map({ $0 != " " && $0 != "\n" && !"([{".contains($0) }) == true { current += " " }
                     current += String(characters[next]) + "\u{0302}"
                     if between == "\n" { current = current.replacingOccurrences(of: #" ([^ ]\x{0302})$"#, with: "\n$1", options: .regularExpression) }
                     index = next + 1
