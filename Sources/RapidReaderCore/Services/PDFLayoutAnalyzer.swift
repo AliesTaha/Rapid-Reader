@@ -1293,8 +1293,11 @@ enum PDFLayoutAnalyzer {
                 && token.filter(\.isLetter).count <= 4
                 // A logarithm's base, as the "k" of "logₖ(x)", comes before its argument.
                 || token.range(of: #"^\W*(log|sum|min|max)[a-z]\("#, options: .regularExpression) != nil
+                // So is a function in an exponent, as the "gcd(k,n)" of "m^gcd(k,n)".
+                || token.range(of: #"^\W*[a-z](gcd|lcm|log|min|max)\("#, options: .regularExpression) != nil
         }
-        guard line.split(separator: " ").contains(where: candidate), selection.numberOfTextRanges(on: page) == 1, let raw = selection.string,
+        guard line.split(separator: " ").contains(where: candidate) || line.range(of: #"(?<!\S)\p{Lu} \p{Ll}(?!\S)"#, options: .regularExpression) != nil,
+              selection.numberOfTextRanges(on: page) == 1, let raw = selection.string,
               raw.trimmingCharacters(in: .whitespacesAndNewlines) == line else { return [:] }
         let lineRange = selection.range(at: 0, on: page)
         guard lineRange.location != NSNotFound else { return [:] }
@@ -1422,6 +1425,13 @@ enum PDFLayoutAnalyzer {
                     glyphs = found.map(\.span)
                     measured = found
                     level = fineBaseline
+                    // A power of a function, as "m^gcd(k,n)", is a base well below all that follows it.
+                    if String(text).range(of: #"^[a-z][a-z]{2,}\(.*\)[.,]?$"#, options: .regularExpression) != nil, found.count >= text.count - 1,
+                       let first = found.first, found.dropFirst().filter({ $0.bottom - first.bottom >= size * 0.25 }).count * 10 >= (found.count - 1) * 7 {
+                        result[String(line[whole])] = String(line[whole.lowerBound..<token.lowerBound]) + String(text.first!) + "^(" + String(text.dropFirst()) + ")"
+                            + String(line[token.upperBound..<whole.upperBound])
+                        break tokens
+                    }
                     // A footnote's mark after a long word, as the "1" of "quickselect1,", is told by its
                     // own glyphs, even where two of the word's letters touch.
                     if found.count != text.count, let mark = String(text).firstMatch(of: /^\p{Ll}{4,}(\d{1,2})([.,;:)]?)$/) {
@@ -1448,7 +1458,9 @@ enum PDFLayoutAnalyzer {
                 // A letter with a descender, as the "y" of "y₁", has no glyph on the baseline beside
                 // its index; the line's baseline and type size are the measure then.
                 let base = text.firstIndex(where: \.isLetter) ?? 0
+                // So has an exponent after a bracket, as the "n−x" of "(1 − p)ⁿ⁻ˣ".
                 let hanging = base + 1 < text.count && base <= 1 && "gpqy".contains(text[base]) && (text[base + 1].isNumber || text[base + 1].isLetter)
+                    || text.firstIndex(of: ")").map { $0 > 0 && text[$0 - 1].isLetter && $0 + 1 < text.count && text[$0 + 1].isLetter } == true
                 guard resting.count >= 2 || hanging else { continue }
                 // An exponent rides on something that sits on the baseline, as the "2" of "2³¹". Its
                 // height is the measure. Ink from the lines above can reach into a letter's columns, so
@@ -1526,15 +1538,19 @@ enum PDFLayoutAnalyzer {
                 // stands well clear of the baseline; a speck of ink from the line above is not a character.
                 // An exponent Unicode cannot write, as the "|S|" of "2^|S|", is written after a caret
                 // when it ends the token.
-                let suffix = raised.sorted() == Array((text.count - raised.count)..<text.count)
+                // A bracket between raised signs is in the exponent only when it stands off the baseline,
+                // unlike the ")" of "(10⁵)²".
+                func offLine(_ index: Int) -> Bool { !"()".contains(text[index]) || (bottoms[index] ?? level) >= level + 1 }
+                let between = text.indices.filter { "()/−+-".contains(text[$0]) && !raised.contains($0) && $0 > 0 && $0 + 1 < text.count && raised.contains($0 - 1) && raised.contains($0 + 1) && offLine($0) }
+                let suffix = (raised + between).sorted() == Array((text.count - raised.count - between.count)..<text.count)
                 guard !raised.isEmpty, raised.contains(where: letter), raised.allSatisfy({ index in
                     guard let bottom = bottoms[index], let top = tops[index] else { return false }
-                    return (superscripts[text[index]] != nil || suffix && (text[index].isASCII && text[index].isUppercase || text[index] == "|")) && (!letter(index) || height(index) <= seatedHeight * (digits.isEmpty ? 0.85 : 0.8) && height(index) >= seatedHeight * 0.35
+                    return (superscripts[text[index]] != nil || suffix && (text[index].isLetter || text[index].isNumber || "|()−+".contains(text[index]))) && (!letter(index) || height(index) <= seatedHeight * (!text[index].isASCII ? 0.95 : digits.isEmpty ? 0.85 : 0.8) && height(index) >= seatedHeight * 0.35
                         && (top > seatedTop + 0.5 || top > seatedTop - 0.5 && bottom >= level + seatedHeight * 0.45))
                 }) else { continue }
                 // An operator between two raised characters, as the "/" of "2ⁿᐟ²" or the "−" of
                 // "2ⁿ⁻¹", is part of the exponent even where it sits low.
-                for index in text.indices where "/−+-".contains(text[index]) && !raised.contains(index)
+                for index in text.indices where "/−+-()".contains(text[index]) && !raised.contains(index) && offLine(index)
                     && index > 0 && index + 1 < text.count && raised.contains(index - 1) && raised.contains(index + 1) {
                     raised.append(index)
                 }
@@ -1564,7 +1580,12 @@ enum PDFLayoutAnalyzer {
                 if lifted.allSatisfy({ superscripts[text[$0]] != nil }) {
                     for index in lifted { written[index] = superscripts[text[index]]! }
                 } else {
-                    written = Array(text[..<lifted.min()!]) + ["^"] + Array(text[lifted.min()!...])
+                    // More than one sign goes in brackets: "x^(ϕ(m)−1)".
+                    let exponent = String(text[lifted.min()!...])
+                    // An ordinal's letters, as the "th" of "99th", are no exponent.
+                    // One that opens with a sign, as the "−s" of "e^(−s′)", goes on past the token.
+                    if exponent.range(of: #"^(st|nd|rd|th)[.,;:]?$|^[−+-]"#, options: .regularExpression) != nil { continue }
+                    written = Array(text[..<lifted.min()!]) + Array("^" + (exponent.count == 1 || exponent.hasPrefix("(") && exponent.hasSuffix(")") || exponent.hasPrefix("|") && exponent.hasSuffix("|") ? exponent : "(" + exponent + ")"))
                 }
                 let rewritten = String(line[whole.lowerBound..<token.lowerBound]) + String(written) + String(line[token.upperBound..<whole.upperBound])
                 if measured != nil, looksLikeMath(line), !looksLikeMath(line.replacingCharacters(in: whole, with: rewritten)) { continue }
@@ -1572,6 +1593,21 @@ enum PDFLayoutAnalyzer {
                 break tokens
             }
           }
+        }
+        // An exponent PDFKit set apart from its base, as the "n" of "X n" for "Xⁿ", stands clear
+        // above the baseline on its own.
+        let all = Array(line.ranges(of: /\S+/))
+        for position in all.indices.dropFirst() {
+            let base = line[all[position - 1]], power = line[all[position]]
+            guard base.count == 1, base.first!.isUppercase, power.count == 1, let small = superscripts[power.first!], power.first!.isLetter,
+                  result[String(base)] == nil else { continue }
+            let local = NSRange(all[position], in: line)
+            guard let piece = page.selection(for: NSRange(location: lineRange.location + leading + local.location, length: local.length)),
+                  (piece.string ?? "").trimmingCharacters(in: .whitespaces) == String(power) else { continue }
+            let box = piece.bounds(for: page)
+            guard let bottom = ink.lowestInk(in: CGRect(x: box.minX, y: band.minY, width: box.width, height: band.height)),
+                  bottom >= baseline + size * 0.3 else { continue }
+            result[String(base) + " " + String(power)] = String(base) + String(small)
         }
         return result
     }
