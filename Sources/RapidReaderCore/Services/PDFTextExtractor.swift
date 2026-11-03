@@ -485,8 +485,14 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<![\p{L}])log([a-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
                 .replacingOccurrences(of: #"·\s?·\s?·"#, with: "⋯", options: .regularExpression)
-                // A web address broken after a slash goes on without a space.
-                .replacingOccurrences(of: #"(https?://\S*/)\n(?=\w)"#, with: "$1", options: .regularExpression)
+                // A web address broken after a slash or a dot goes on without a space.
+                .replacingOccurrences(of: #"(https?://\S*[/.])\n(?=\w)"#, with: "$1", options: .regularExpression)
+                // A range of pages broken after its dash, as "321–" + "322", is one.
+                .replacingOccurrences(of: #"(?<=\d)–\s+(?=\d)"#, with: "–", options: .regularExpression)
+                // Bars around a term take no space inside, as "| f(X)|"; a sign set apart from its
+                // term, as "(x₁,− y₁)", goes on it.
+                .replacingOccurrences(of: #"(?<=\s|\()\| ([^\s|]{1,12}\|)"#, with: "|$1", options: .regularExpression)
+                .replacingOccurrences(of: #",−\s(?=\p{L})"#, with: ", −", options: .regularExpression)
                 .replacingOccurrences(of: "ﬃ", with: "ffi").replacingOccurrences(of: "ﬄ", with: "ffl")
                 .replacingOccurrences(of: "ﬀ", with: "ff").replacingOccurrences(of: "ﬁ", with: "fi").replacingOccurrences(of: "ﬂ", with: "fl")
             return TextProcessor.normalizedText(rejoiningSplitWords(dehyphenated(attachingAccents(composingNameAccents(separatingIdentifiers(joined))))))

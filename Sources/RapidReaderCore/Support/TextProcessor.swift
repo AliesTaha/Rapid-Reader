@@ -207,7 +207,7 @@ public enum TextProcessor {
         if token.count >= 2, token.allSatisfy({ "+-=<>!&|".contains($0) }) { return true }
         return token.unicodeScalars.contains { scalar in
             CharacterSet.alphanumerics.contains(scalar) || scalar.properties.generalCategory == .mathSymbol
-                || "∅∞&%#√∑∏∫∂∇∀∃⋯/@*\\".unicodeScalars.contains(scalar)
+                || "∅∞&%#√∑∏∫∂∇∀∃⋯/@*\\·".unicodeScalars.contains(scalar)
         }
     }
 
