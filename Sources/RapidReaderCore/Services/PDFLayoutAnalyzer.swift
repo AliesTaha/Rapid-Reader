@@ -128,7 +128,9 @@ enum PDFLayoutAnalyzer {
             var text = leaders ? text.replacingOccurrences(of: #"\s*(\. ?){4,}\s*"#, with: " ", options: .regularExpression) : text
             // Short leaders before a page number, as in "Backdoor Adjustment . . . 44".
             text = text.replacingOccurrences(of: #"(\s*\.){3,}\s*(\d+)$"#, with: " $2", options: .regularExpression)
-            let kind: SectionFigure.Kind? = leaders ? nil : isMonospaced(selection, on: page, text: pageText, line: text) || looksLikeCode(text) ? .code
+            // A row of box characters, as "• ⊓⊏⊐⊓⊏⊐⊓" for a row of tiles, is read.
+            let tiles = text.range(of: #"^[•⊓⊔⊏⊐□\s]+$"#, options: .regularExpression) != nil
+            let kind: SectionFigure.Kind? = leaders || tiles ? nil : isMonospaced(selection, on: page, text: pageText, line: text) || looksLikeCode(text) ? .code
                 : looksLikeMath(text) ? .formula : isDataRow(text) ? .image : nil
             return Line(text: text, bounds: selection.bounds(for: page), kind: kind)
         }
@@ -1682,6 +1684,7 @@ enum PDFLayoutAnalyzer {
             let key = String(line[previous]) + " " + String(line[next])
             result[key] = String(line[previous]) + (joined ? "" : " ") + "√" + String(line[next])
         }
+        var chained: (key: String, value: String, end: Int)?
         // Other signs drawn without a character, in the space between two tokens: "···" in
         // "X1 + X2 + + Xn" and "∅" in "mex( )".
         for position in tokens.indices.dropFirst() {
@@ -1689,7 +1692,7 @@ enum PDFLayoutAnalyzer {
             let key = String(line[previous]) + " " + String(line[next])
             // PDFKit's box for the token before can take in the space and the sign; the token
             // ends where its own characters, as typeset, do.
-            guard result[key] == nil, var before = bounds(previous), let after = bounds(next) else { continue }
+            guard result[key] == nil || chained?.end == position - 1, var before = bounds(previous), let after = bounds(next) else { continue }
             let local = NSRange(previous, in: line)
             if let typeset = page.selection(for: NSRange(location: lineRange.location + leading + local.location, length: local.length))?.attributedString?.size().width,
                typeset > 1, typeset < before.width {
@@ -1716,9 +1719,28 @@ enum PDFLayoutAnalyzer {
                 // of "∅" in "The symbol ∅ denotes" or "are ∅, {2}".
                 sign = fine.signs(in: gap, baseline: baseline, size: size)
             }
-            guard let sign else { continue }
-            let closing = line[next].first.map { ")}],;".contains($0) } == true
-            result[key] = String(line[previous]) + (open ? "" : " ") + sign + (closing && !sign.hasSuffix(",") ? "" : " ") + String(line[next])
+            guard var sign else { continue }
+            // A comma the box of the token before left out is that token's own.
+            if sign.hasPrefix(","), line[previous].hasSuffix(",") { sign.removeFirst() }
+            if sign.hasSuffix(","), line[next].hasPrefix(",") { sign.removeLast() }
+            guard !sign.isEmpty else { continue }
+            // Box characters run together, as "⊔⊏⊐⊔⊓⊓⊔".
+            let boxes = "⊓⊔⊏⊐□"
+            let glued = sign.allSatisfy { boxes.contains($0) }
+            let closing = line[next].first.map { ")}],;.".contains($0) } == true || glued && line[next].first.map { boxes.contains($0) } == true
+            let opening = open || glued && line[previous].last.map { boxes.contains($0) } == true
+            let value = String(line[previous]) + (opening ? "" : " ") + sign + (closing && !sign.hasSuffix(",") ? "" : " ") + String(line[next])
+            // Signs in neighbouring spaces, as the "⊏" and "⊐" of "{⊓, ⊔, ⊏, ⊐}", share a token; the
+            // pieces are rewritten as one.
+            if let last = chained, last.end == position - 1 {
+                result[last.key] = nil
+                let joined = last.key + " " + String(line[next]), rewritten = last.value + String(value.dropFirst(line[previous].count))
+                result[joined] = rewritten
+                chained = (joined, rewritten, position)
+            } else {
+                result[key] = value
+                chained = (key, value, position)
+            }
         }
         return result
     }
@@ -3741,8 +3763,13 @@ private struct FineInk {
     /// The signs drawn in `area` without characters, told by their shape, as "∅," or "\\"; nil
     /// when any glyph there is something else.
     func signs(in area: CGRect, baseline: CGFloat, size: CGFloat) -> String? {
-        let found = glyphs(in: area)
-        guard !found.isEmpty, found.count <= 3 else { return nil }
+        // Slivers of the neighbouring letters at the area's edges are no signs.
+        let found = glyphs(in: area).filter { glyph in
+            let width = glyph.span.upperBound - glyph.span.lowerBound
+            let edge = glyph.span.lowerBound <= area.minX + 0.5 || glyph.span.upperBound >= area.maxX - 0.5
+            return width >= 0.6 && !(edge && width < 1.5)
+        }
+        guard !found.isEmpty, found.count <= 8 else { return nil }
         var result = ""
         for glyph in found {
             let width = glyph.span.upperBound - glyph.span.lowerBound, height = glyph.top - glyph.bottom
@@ -3785,14 +3812,26 @@ private struct FineInk {
                 } else if hangs, ratio <= 0.8, rowRuns.allSatisfy({ $0 == 1 }), let first = runs(row: top).first, let last = runs(row: bottom).first,
                           last.lowerBound - first.lowerBound >= (right - left) / 2 {
                     result += "\\"
-                } else if (0.7...1.4).contains(ratio), edges.allSatisfy(spans) {
-                    let centres = sideRuns.flatMap { $0 }.map { CGFloat($0.lowerBound + $0.upperBound) / 2 - CGFloat(left) }
-                    let w = CGFloat(right - left)
-                    if sideRuns.allSatisfy({ $0.count == 2 }) { result += "□" }
-                    else if sideRuns.allSatisfy({ $0.count == 1 }), centres.allSatisfy({ $0 < w * 0.3 }) { result += "⊏" }
-                    else if sideRuns.allSatisfy({ $0.count == 1 }), centres.allSatisfy({ $0 > w * 0.7 }) { result += "⊐" }
-                    else { return nil }
-                } else {
+                } else if (0.7...1.4).contains(ratio), let box = { () -> String? in
+                    // A box's sides: a stroke runs along a side when nearly every row, or column,
+                    // has ink within a quarter of the glyph from it; the middle stays blank.
+                    let w = right - left + 1, h = bottom - top + 1, qw = max(1, w / 4), qh = max(1, h / 4)
+                    func share(_ hits: Int, _ of: Int) -> Double { Double(hits) / Double(of) }
+                    let leftSide = share(rows.filter { row in (left..<(left + qw)).contains { inked(row, $0) } }.count, h)
+                    let rightSide = share(rows.filter { row in ((right - qw + 1)...right).contains { inked(row, $0) } }.count, h)
+                    let cols = Array(left...right)
+                    let topSide = share(cols.filter { column in (top..<(top + qh)).contains { inked($0, column) } }.count, w)
+                    let bottomSide = share(cols.filter { column in ((bottom - qh + 1)...bottom).contains { inked($0, column) } }.count, w)
+                    let middle = ((top + qh + 1)..<max(top + qh + 2, bottom - qh)).contains { row in ((left + qw + 1)..<max(left + qw + 2, right - qw)).contains { inked(row, $0) } }
+                    guard !middle, topSide >= 0.8, bottomSide >= 0.8 else { return nil }
+                    switch (leftSide >= 0.8, rightSide >= 0.8) {
+                    case (true, true): return "□"
+                    case (true, false): return "⊏"
+                    case (false, true): return "⊐"
+                    default: return nil
+                    }
+                }() {
+                    result += box                } else {
                     return nil
                 }
             } else {
