@@ -2601,9 +2601,15 @@ enum PDFLayoutAnalyzer {
         guard text.unicodeScalars.allSatisfy({ $0.value < 0x80 || "−×·…".unicodeScalars.contains($0) }), !text.contains("_ "),
               text.contains(where: { $0.isLetter || $0.isNumber }) else { return false }
         let named = text.range(of: #"[A-Za-z][A-Za-z0-9_.]{1,}[(\[]"#, options: .regularExpression) != nil
-        let figures = text.replacingOccurrences(of: #"\d+(\.\d+)?[eE][+−-]?\d+|\b(ms|us|ns|s|GB|MB|kB|TB|GiB|MiB|FLOPs?|bytes?)\b"#, with: "1", options: .regularExpression)
+        // A unit can stand against its figure, as "1.01ms".
+        let figures = text.replacingOccurrences(of: #"\d+(\.\d+)?[eE][+−-]?\d+|\b(ms|us|ns|GB|MB|kB|TB|GiB|MiB|FLOPs?|bytes?)\b|(?<=\d)(ms|us|ns|GB|MB|kB|TB|GiB|MiB)\b"#, with: "1", options: .regularExpression)
             .allSatisfy { $0.isNumber || " .,+−-*/=()<>×·%".contains($0) }
-        return named || figures
+        // Names of three letters or more, as "FSDP +" or "+ ReduceScatter.", are words; a single
+        // letter can hide a sign drawn over it, as the slash of "AB ≠ BA".
+        let words = text.split(whereSeparator: { !$0.isLetter }).allSatisfy { run in
+            run.count >= 3 && (run.allSatisfy(\.isUppercase) || run.dropFirst().contains(where: \.isUppercase))
+        } && text.contains(where: \.isLetter) && !text.contains("=")
+        return named || figures || words
     }
 
     /// On a web page, ink that is a glyph or two, as a lone "(" or "≈", or that lies on one row.
