@@ -7,7 +7,7 @@ public enum PDFTextExtractor {
             throw DocumentImportError.unreadableFile(url.lastPathComponent)
         }
         var figures: [PDFLayoutAnalyzer.PageFigure] = []
-        let pages = cleanedPages((0..<document.pageCount).map { index in
+        var pages = cleanedPages((0..<document.pageCount).map { index in
             guard let page = document.page(at: index) else { return "" }
             let layout = PDFLayoutAnalyzer.layout(of: page, firstFigureNumber: figures.count)
             figures += layout.figures
@@ -31,6 +31,7 @@ public enum PDFTextExtractor {
         if let outline = document.outlineRoot { visit(outline) }
         // A document without an outline, as a web page printed to PDF, has its headings found by the layout instead.
         if chapters.isEmpty {
+            pages = droppingListedContents(pages)
             let heading = PDFLayoutAnalyzer.headingPrint
             for (page, text) in pages.enumerated() {
                 for line in text.components(separatedBy: "\n") where line.hasPrefix(heading) {
@@ -38,6 +39,13 @@ public enum PDFTextExtractor {
                     if !title.isEmpty { chapters.append((page, title)) }
                 }
             }
+            // A series' name over a post's title, as "How I Think About My Research Process" over "How I Think
+            // About My Research Process: Explore, Understand, Distill", is a link, not a section.
+            chapters = chapters.enumerated().filter { offset, chapter in
+                guard offset + 1 < chapters.count else { return true }
+                let next = chapters[offset + 1]
+                return !(next.page == chapter.page && next.title.count > chapter.title.count && next.title.lowercased().hasPrefix(chapter.title.lowercased()))
+            }.map(\.element)
         }
         // Outline order is kept among entries on one page; each finds its own heading line below.
         chapters = chapters.enumerated().sorted { ($0.element.page, $0.offset) < ($1.element.page, $1.offset) }.map(\.element)
@@ -153,13 +161,30 @@ public enum PDFTextExtractor {
             var merged: [BookSection] = []
             for (position, section) in sections.enumerated() {
                 if let last = merged.last, last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   added.contains(where: { $0 == entries[kept[position]].start }) {
-                    merged[merged.count - 1] = BookSection(title: last.title + ": " + section.title, text: section.text)
+                   document.outlineRoot == nil || added.contains(where: { $0 == entries[kept[position]].start }) {
+                    // A web page's first empty heading is a label over its title, as a series' name; it goes.
+                    merged[merged.count - 1] = document.outlineRoot == nil && merged.count == 1 ? section
+                        : BookSection(title: last.title + ": " + section.title, text: section.text)
                 } else {
                     merged.append(section)
                 }
             }
             sections = merged
+            // A web page goes on past its article into the site's own lists, as "More from Neel Nanda",
+            // "Curated and popular this week" or the comments; the article ends there.
+            if document.outlineRoot == nil, sections.count >= 3,
+               let end = sections.indices.first(where: { $0 >= sections.count / 2 && sections[$0].title.range(of: #"^(More from\b|Curated and popular|Recent Discussion|Recommended\b|Related posts|Comments\b|\d+ comments?\b|Leave a comment|Share\b)"#, options: [.regularExpression, .caseInsensitive]) != nil }) {
+                sections.removeSubrange(end...)
+            }
+            // So does the post: at its links to the next and previous posts, its comments or karma.
+            if document.outlineRoot == nil, sections.count >= 2 {
+                let tail = #"(?m)^(Next:|Previous:|\d+ comments?, sorted by\b|No comments\b|Mentioned in$|Log in to save where you left off)"#
+                if let index = sections.indices.first(where: { $0 >= sections.count / 2 && sections[$0].text.range(of: tail, options: .regularExpression) != nil }),
+                   let cut = sections[index].text.range(of: tail, options: .regularExpression) {
+                    sections[index] = BookSection(title: sections[index].title, text: String(sections[index].text[..<cut.lowerBound]))
+                    sections.removeSubrange((index + 1)...)
+                }
+            }
         }
         let readable = placingFigures(sections, figures: figures)
         guard !readable.isEmpty else { throw DocumentImportError.emptyDocument(url.lastPathComponent) }
@@ -476,8 +501,13 @@ public enum PDFTextExtractor {
         for page in lines {
             for line in Set(page.filter { $0.count <= 100 && !PDFLayoutAnalyzer.isMarker($0) }.map(figuresAside)) { anywhere[line, default: 0] += 1 }
         }
+        // So does the page's title a browser prints over each page, as "Highly Opinionated Advice on How
+        // to Write ML Papers—AI Alignment Forum": the same line on most of the pages.
+        var exact: [String: Int] = [:]
+        for page in lines { for line in Set(page.filter { $0.count >= 12 && $0.count <= 160 && !PDFLayoutAnalyzer.isMarker($0) }) { exact[line, default: 0] += 1 } }
         func furniture(_ value: String) -> Bool {
             value.count <= 100 && (value.contains(where: \.isNumber) && value.contains(where: \.isLetter) || value.contains("://")) && anywhere[figuresAside(value), default: 0] >= threshold
+                || lines.count >= 3 && exact[value, default: 0] >= max(3, lines.count * 6 / 10)
         }
         // Printed page numbers trail the page index by a fixed amount; once that is known, a page's
         // own number goes wherever reading order put it, as after margin notes.
@@ -490,7 +520,8 @@ public enum PDFTextExtractor {
         let ranked = offsets.sorted { $0.value > $1.value }
         let offset = ranked.first.flatMap { best in best.value >= 5 && best.value >= (ranked.dropFirst().first?.value ?? 0) * 3 ? best.key : nil }
         var kept: [[String]] = marked.enumerated().map { index, page in
-            var cleaned = page
+            // A browser's footer PDFKit ran onto the page's last line, as "Resist this. https://… 12/34", goes.
+            var cleaned = page.map { $0.replacingOccurrences(of: #"\s*h\s?t\s?t\s?p\s?s?\s?:\s?/\s?/[^\n]*?\s\d{1,3}\s?/\s?\d{1,3}\s*$"#, with: "", options: .regularExpression) }.filter { !$0.isEmpty }
             if let offset {
                 // So does a running header that carries it, as "5 Randomized Experiments 50" or "A Proofs 87".
                 let number = String(index - offset)
@@ -665,6 +696,8 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<=\p{L}[,;]?)¬"#, with: " ¬", options: .regularExpression)
                 // A web address broken after a slash or a dot goes on without a space.
                 .replacingOccurrences(of: #"(https?://\S*[/.])\n(?=\w)"#, with: "$1", options: .regularExpression)
+                // A web footnote's link back to its mark, the "^" of "1. ^ Note: …", is not read.
+                .replacingOccurrences(of: #"(?m)(^|(?<=\s))(\d{1,3}\.)\s+\^(?=\s)"#, with: "$1$2", options: .regularExpression)
                 // A range of pages broken after its dash, as "321–" + "322", is one.
                 .replacingOccurrences(of: #"(?<=\d)–\s+(?=\d)"#, with: "–", options: .regularExpression)
                 // Bars around a term take no space inside, as "| f(X)|"; a sign set apart from its
@@ -724,6 +757,29 @@ public enum PDFTextExtractor {
             index += 1
         }
         return lines
+    }
+
+    /// A web page's contents box, "Contents" over numbered links to its own headings, as "1. The short
+    /// version" + "2. The three questions: …", is a map of the page, not text to read.
+    static func droppingListedContents(_ pages: [String]) -> [String] {
+        let heading = PDFLayoutAnalyzer.headingPrint, small = PDFLayoutAnalyzer.smallPrint
+        func plain(_ line: String) -> String { line.replacingOccurrences(of: heading, with: "").replacingOccurrences(of: small, with: "").trimmingCharacters(in: .whitespaces) }
+        func letters(_ text: String) -> String { text.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let titles = Set(pages.flatMap { $0.components(separatedBy: "\n") }.filter { $0.hasPrefix(heading) }.map { letters(plain($0)) })
+        var result = pages
+        for page in result.indices.prefix(4) {
+            var lines = result[page].components(separatedBy: "\n")
+            guard let start = lines.firstIndex(where: { plain($0).range(of: #"^(Contents|Table of Contents|CONTENTS|On this page)$"#, options: .regularExpression) != nil }) else { continue }
+            var end = start + 1, matched = 0
+            while end < lines.count, let entry = plain(lines[end]).firstMatch(of: /^\d{1,3}\.\s+(.+)$/) {
+                if titles.contains(letters(String(entry.output.1))) { matched += 1 }
+                end += 1
+            }
+            guard matched >= 3, matched * 2 >= end - start - 1 else { continue }
+            lines.removeSubrange(start..<end)
+            result[page] = lines.joined(separator: "\n")
+        }
+        return result
     }
 
     /// A reference's label on a line of its own, as "[12]", joins the entry it labels; on a

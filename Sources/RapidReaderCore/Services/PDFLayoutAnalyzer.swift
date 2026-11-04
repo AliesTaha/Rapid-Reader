@@ -64,7 +64,9 @@ enum PDFLayoutAnalyzer {
         // Some PDFs list a page's lines from the bottom up; reading goes from the top down.
         let centres = found.map { $0.selection.bounds(for: page) }
         let steps = zip(centres, centres.dropFirst()).filter { min($0.maxX, $1.maxX) > max($0.minX, $1.minX) }
-        if steps.filter({ $1.midY > $0.midY + 1 }).count > steps.filter({ $1.midY < $0.midY - 1 }).count * 2 {
+        // A web page is one column, but PDFKit can list a list's numbers before its lines, as footnotes'
+        // "1." and "^" before their text; it too reads by rows.
+        if steps.filter({ $1.midY > $0.midY + 1 }).count > steps.filter({ $1.midY < $0.midY - 1 }).count * 2 || printedFromWeb(page) {
             // Rows from the top, each read from the left.
             var rows: [Int] = Array(repeating: 0, count: found.count), top: CGRect?, row = 0
             let downward = found.indices.sorted { centres[$0].midY > centres[$1].midY }
@@ -144,15 +146,25 @@ enum PDFLayoutAnalyzer {
         }
         // After the rewrites, which read each piece against its own characters.
         joinDetachedIndices(&found, respacedTokens: &respacedTokens, on: page)
-        var lines: [Line] = found.map { selection, text in
+        let webPage = printedFromWeb(page)
+        var lines: [Line] = found.map { selection, printed in
+            // A browser can print slanted text letter by letter, as "O ur g o a l i n th i s b o ok":
+            // most of the line's pieces are a letter or two. Its letters run together and the
+            // dictionary finds the words again.
+            let pieces = printed.split(whereSeparator: \.isWhitespace)
+            let respaced = webPage && pieces.count >= 8 && !printed.contains("://") && pieces.filter({ $0.count <= 2 && $0.allSatisfy(\.isLetter) }).count * 2 >= pieces.count
+                ? WordSplitter.regrouped(pieces.map(String.init)) : printed
             // Table-of-contents entries end in dot leaders and are prose, whatever else they hold.
-            let leaders = text.range(of: #"(\. ?){4,}"#, options: .regularExpression) != nil
-            var text = leaders ? text.replacingOccurrences(of: #"\s*(\. ?){4,}\s*"#, with: " ", options: .regularExpression) : text
+            let leaders = respaced.range(of: #"(\. ?){4,}"#, options: .regularExpression) != nil
+            var text = leaders ? respaced.replacingOccurrences(of: #"\s*(\. ?){4,}\s*"#, with: " ", options: .regularExpression) : respaced
             // Short leaders before a page number, as in "Backdoor Adjustment . . . 44".
             text = text.replacingOccurrences(of: #"(\s*\.){3,}\s*(\d+)$"#, with: " $2", options: .regularExpression)
             // A row of box characters, as "• ⊓⊏⊐⊓⊏⊐⊓" for a row of tiles, is read.
             let tiles = text.range(of: #"^[•⊓⊔⊏⊐□\s]+$"#, options: .regularExpression) != nil
-            let kind: SectionFigure.Kind? = leaders || tiles ? nil : isMonospaced(selection, on: page, text: pageText, line: text) || looksLikeCode(text) ? .code
+            // On a web page a sentence with a path or a name set as code in it, as "The worklog:
+            // expert-distillation/…/STATUS.md (every", is prose.
+            let sentence = webPage && text.split(whereSeparator: \.isWhitespace).filter({ isProseToken(String($0)) }).count >= 3
+            let kind: SectionFigure.Kind? = leaders || tiles || sentence ? nil : isMonospaced(selection, on: page, text: pageText, line: text) || looksLikeCode(text) ? .code
                 : looksLikeMath(text) ? .formula : isDataRow(text) ? .image : nil
             return Line(text: text, bounds: selection.bounds(for: page), kind: kind)
         }
@@ -179,9 +191,11 @@ enum PDFLayoutAnalyzer {
             let prose = lines.indices.filter { lines[$0].text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 8 }.compactMap { sizes[$0] }.sorted()
             let text = web ? max(body, prose.isEmpty ? body : prose[prose.count / 2], documentTextSize(page) ?? 0) : body
             for index in lines.indices where sizes[index].map({ $0 >= text * (web ? 1.04 : 1.2) }) == true && (lines[index].kind == nil
-                || lines[index].kind == .formula && lines[index].text.range(of: #"^\p{Lu}\p{Ll}{2,}\s"#, options: .regularExpression) != nil) {
+                || lines[index].kind == .formula && lines[index].text.range(of: #"^([A-Z0-9]{1,2}\.\s+)?\p{Lu}\p{Ll}{2,}:?\s"#, options: .regularExpression) != nil) {
                 let words = lines[index].text.split(whereSeparator: \.isWhitespace)
-                let continued = index > 0 && sizes[index - 1].map { abs($0 - sizes[index]!) < 0.5 } == true
+                // A numbered heading, as "1. Why joint RL" under "B. Notes: …", starts its own.
+                let numbered = web && lines[index].text.range(of: #"^([A-Z]|\d{1,2})\.\s"#, options: .regularExpression) != nil
+                let continued = !numbered && index > 0 && sizes[index - 1].map { abs($0 - sizes[index]!) < 0.5 } == true
                     && lines[index - 1].bounds.minY - lines[index].bounds.maxY < sizes[index]! * 1.5
                 // A name in capitals, as "IOI" or "ICPC", can be a heading too.
                 // On a web page a display set large, as "min ∥ x− …", is no heading: a heading has words.
@@ -189,8 +203,9 @@ enum PDFLayoutAnalyzer {
                     let letters = wordLetters(String(word))
                     return letters.count >= 3 && letters.count * 10 >= word.count * 7 && isDictionaryWord(letters.lowercased()) && !mathWords.contains(letters.lowercased())
                 }
-                let named = !web || words.filter(named).count >= 2 || words.count <= 2 && words.contains(where: named)
-                lines[index].heading = !continued && named && (1...(web ? 24 : 8)).contains(words.count) && words.contains(where: { isWord($0) || $0.count >= 2 && $0.allSatisfy(\.isUppercase) })
+                // A heading set well above the text, as "TL;DR" or "Prioritisation", needs no dictionary word.
+                let named = !web || words.contains(where: named) || sizes[index].map({ $0 >= text * 1.3 }) == true && lines[index].text.contains(where: \.isLetter)
+                lines[index].heading = !continued && named && (1...(web ? 24 : 8)).contains(words.count) && words.contains(where: { isWord($0) || $0.filter(\.isLetter).count >= 2 && $0.filter(\.isLetter).allSatisfy(\.isUppercase) })
                     && lines[index].text.range(of: #"[.,;:]$"#, options: .regularExpression) == nil
                 if lines[index].heading { lines[index].kind = nil }
             }
@@ -200,14 +215,18 @@ enum PDFLayoutAnalyzer {
                 for index in lines.indices where lines[index].heading {
                     var next = index + 1
                     // The rest of its row, PDFKit can give as a piece of its own beside it.
-                    while next < lines.count, let size = sizes[index], sizes[next].map({ abs($0 - size) < 0.5 }) == true,
-                          lines[next].bounds.maxY <= lines[index].bounds.minY + 1 && lines[next - 1].bounds.minY - lines[next].bounds.maxY < size * 1.5
+                    // A sign with no letters to size it, as the "→" of "base 16.5% → Adam 66.0%", goes on its row.
+                    while next < lines.count, let size = sizes[index], sizes[next].map({ abs($0 - size) < 0.5 }) ?? true,
+                          // A large title's lines can overlap their boxes; the next line's middle lies below this one.
+                          sizes[next] != nil && lines[next].bounds.midY < lines[next - 1].bounds.minY && lines[next - 1].bounds.minY - lines[next].bounds.maxY < size * 1.5
                             || abs(lines[next].bounds.midY - lines[next - 1].bounds.midY) < size * 0.4 && lines[next].bounds.minX >= lines[next - 1].bounds.maxX - 1
                                 && lines[next].bounds.minX - lines[next - 1].bounds.maxX < size * 3,
-                          !lines[next].heading, lines[next].text.split(whereSeparator: \.isWhitespace).count <= 16 {
+                          !lines[next].heading || abs(lines[next].bounds.midY - lines[index].bounds.midY) < 2, lines[next].text.split(whereSeparator: \.isWhitespace).count <= 16,
+                          lines[next].text.range(of: #"^([A-Z]|\d{1,2})\.\s"#, options: .regularExpression) == nil {
                         lines[index].text += " " + lines[next].text
                         lines[index].bounds = lines[index].bounds.union(lines[next].bounds)
                         lines[next].text = ""
+                        lines[next].heading = false
                         next += 1
                     }
                 }
@@ -218,7 +237,7 @@ enum PDFLayoutAnalyzer {
         // band of ink at one edge of the box that runs its whole width.
         if let pageInk {
             let usual = lines.map(\.bounds.height).sorted()[lines.count / 2]
-            for index in lines.indices where lines[index].kind == nil && lines[index].bounds.height > max(usual * 2.5, 14)
+            for index in lines.indices where lines[index].kind == nil && !lines[index].heading && lines[index].bounds.height > max(usual * 2.5, 14)
                 && lines[index].text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 3 {
                 if let band = pageInk.edgeTextBand(in: lines[index].bounds, atLeast: usual * 0.6) { lines[index].bounds = band }
             }
@@ -236,11 +255,14 @@ enum PDFLayoutAnalyzer {
             // arrows keeps its ink; all other text is blanked a full line tall.
             let lineHeight = typicalLineHeight(lines.map(\.bounds))
             // A sentence of short tokens, as ".9, and 𝔼[𝑌 | 𝑇 = 0]=", is text all the same.
+            // A web page's text is all text, as a footnote's "10." or "^"; its drawings are pictures.
             let textRects = lines.filter { line in
                 let tokens = line.text.split(whereSeparator: \.isWhitespace)
-                return !tokens.allSatisfy { $0.count <= 3 } || tokens.count >= 5 && tokens.contains(where: isWord)
+                return webPage && !tokens.isEmpty || !tokens.allSatisfy { $0.count <= 3 } || tokens.count >= 5 && tokens.contains(where: isWord)
             }
                 .map { fullHeight($0.bounds, lineHeight: lineHeight) }
+                // A heading's whole box, as a title wrapped over two lines, is text.
+                + lines.filter(\.heading).map(\.bounds)
             // Sentences of the text column, as "Thus, we can calculate 𝑓(𝑛) using the formula".
             let sentences = lines.filter { $0.text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 4 && $0.bounds.width >= 100 }.map(\.bounds)
             var regions = graphicRegions(on: page, bounds: pageBounds, textRects: textRects, labels: lines.map { fullHeight($0.bounds, lineHeight: lineHeight) }, sentences: sentences)
@@ -258,7 +280,12 @@ enum PDFLayoutAnalyzer {
                 regions.removeAll { $0.intersects(area) }
                 regions.append(overlapping.reduce(area) { $0.union($1) })
             }
+            // A browser prints its own header and footer, as "11/3/26, 5:06 PM … How To Scale Your Model"
+            // and "4 of 6", in a band at each edge; no picture reaches into them.
+            let printed = webPage ? pageBounds.insetBy(dx: 0, dy: 24) : pageBounds
             for region in regions {
+                let region = region.intersection(printed)
+                guard !region.isNull, region.height >= 4 else { continue }
                 addGraphic(region, to: &blocks, lines: &lines, pageArea: pageBounds.width * pageBounds.height)
             }
             mergeNeighbours(&blocks, lines: &lines, acrossKinds: true)
@@ -655,7 +682,9 @@ enum PDFLayoutAnalyzer {
                 && memberLines[0].text.range(of: #"(^|\s)(and|is|or|then|so|where)\s"#, options: .regularExpression) != nil
                 && isPlainMath(memberLines[0].text.replacingOccurrences(of: #"(^|\s)(and|is|or|then|so|where)\s"#, with: " , ", options: .regularExpression))
             let hollow = block.kind != .image && !memberText.contains(where: { $0.isLetter || $0.isNumber }) || spoken
-            guard !hollow, let image = renderPNG(of: page, rect: crop, pageBounds: pageBounds, erasing: erased),
+            // A browser's print header and footer stay out of every picture.
+            if webPage { crop = crop.intersection(pageBounds.insetBy(dx: 0, dy: 24)) }
+            guard !hollow, !crop.isNull, crop.height >= 4, let image = renderPNG(of: page, rect: crop, pageBounds: pageBounds, erasing: erased),
                   hasInk(image, crop: block.kind == .image ? nil : crop) else {
                 for line in lines.indices where lines[line].block == index { lines[line].block = nil }
                 continue
@@ -822,7 +851,7 @@ enum PDFLayoutAnalyzer {
                 var complete = true
                 for run in runs {
                     var rect = run.reduce(CGRect.null) { $0.union(tokens[$1].rect) }
-                    if fromWeb, isOneRow(rect, on: page, ink: ink) {
+                    if fromWeb, ordinaryText(run.map { tokens[$0].text }.joined(separator: " ")) || writtenOnOneRow(rect, on: page, ink: ink) {
                         written.formUnion(run)
                         continue
                     }
@@ -854,7 +883,8 @@ enum PDFLayoutAnalyzer {
             }
         }
         // A web page's heading reads as text: its title is the words it prints.
-        for index in lines.indices where lines[index].block == nil && lines[index].kind == nil && !taken.contains(index) && !(fromWeb && lines[index].heading)
+        // A web page writes its scripts as text; pieces after a sentence, as a raised "[1]", are read.
+        for index in lines.indices where !fromWeb && lines[index].block == nil && lines[index].kind == nil && !taken.contains(index)
             && lines[index].text.split(whereSeparator: \.isWhitespace).filter(isWord).count >= 1 {
             let own = lines[index].bounds
             // A subscript can start under the last letter of the sentence.
@@ -1073,7 +1103,7 @@ enum PDFLayoutAnalyzer {
                 if afterName, whole.range(of: #"^\s*[=<>≤≥≈]"#, options: .regularExpression) != nil { whole = "x " + whole }
                 // Braces stretch a box as far as its line's, as on "if coins = {1,3,4}".
                 if chain == nil, apart || fromWeb, fromWeb || rect.height <= max(usualHeight * 1.35, lines[index].bounds.height + 0.5), fromWeb || isPlainMath(whole),
-                   let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
+                   let ink = inlineInk, fromWeb ? ordinaryText(whole) || writtenOnOneRow(rect, on: page, ink: ink) : isOneRow(rect, on: page, ink: ink) { continue }
                 // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first
                 // blank row, a little way at most.
                 var erase: [CGRect] = []
@@ -1220,7 +1250,7 @@ enum PDFLayoutAnalyzer {
                 let own = lines[index].bounds
                 // Plain mathematics that opens or closes a row of prose beside it, as the "−2⁶³...2⁶³" PDFKit
                 // split from "− 1 or about…", is read with it.
-                if fromWeb, isOneRow(own, on: page, ink: ink) { continue }
+                if fromWeb, ordinaryText(text) || writtenOnOneRow(own, on: page, ink: ink) { continue }
                 if isPlainMath(text), lines.contains(where: { other in
                     other.block == nil && sameRow(other.bounds, own) && (other.bounds.minX - own.maxX >= -1 && other.bounds.minX - own.maxX < 6 || own.minX - other.bounds.maxX >= -1 && own.minX - other.bounds.maxX < 6)
                         && other.text.split(whereSeparator: \.isWhitespace).filter({ isProseToken(String($0)) }).count >= 2
@@ -2509,6 +2539,21 @@ enum PDFLayoutAnalyzer {
             && text.contains(where: { "=<>≤≥≠≈∈∉∪∩&|+−-×(±→".contains($0) })
             && text.filter({ "([{".contains($0) }).count == text.filter({ ")]}".contains($0) }).count
             && names.allSatisfy { $0.count == 1 || mathWords.contains($0) || ["and", "or", "if", "for", "mod", "then"].contains($0) }
+    }
+
+    /// Text a web page writes in ordinary characters, as ".01 < p < .05.[7]" or "B?\",": Latin letters,
+    /// figures, punctuation and the common signs, none of the symbols only typeset mathematics uses.
+    fileprivate static func ordinaryText(_ text: String) -> Bool {
+        !text.isEmpty && text.unicodeScalars.allSatisfy { scalar in
+            scalar.value < 0x250 || (0x2000...0x206F).contains(scalar.value) || (0x2190...0x21FF).contains(scalar.value)
+                || "−±×÷≈≠≤≥∼·…".unicodeScalars.contains(scalar)
+        }
+    }
+
+    /// On a web page, ink that is a glyph or two, as a lone "(" or "≈", or that lies on one row.
+    fileprivate static func writtenOnOneRow(_ rect: CGRect, on page: PDFPage, ink: InkMap) -> Bool {
+        guard let glyphs = ink.finer(page)?.glyphs(in: rect) else { return false }
+        return glyphs.count < 2 || isOneRow(rect, on: page, ink: ink)
     }
 
     /// Ink on one row: no glyph is raised, nor set small and low, as an exponent or an index is.
@@ -4717,7 +4762,11 @@ enum PDFLayoutAnalyzer {
         }
         // Five or more points close together are a scatter plot.
         var scatters: [[CGRect]] = []
-        for dot in dots where !regions.contains(where: { $0.insetBy(dx: -4, dy: -4).intersects(dot) }) {
+        // A list's bullets, each just before the start of its line, are no scatter.
+        let bullets = dots.filter { dot in
+            labels.contains { line in line.minX - dot.maxX > 0 && line.minX - dot.maxX < 20 && abs(line.midY - dot.midY) < line.height * 0.6 }
+        }
+        for dot in dots where !bullets.contains(dot) && !regions.contains(where: { $0.insetBy(dx: -4, dy: -4).intersects(dot) }) {
             let joined = scatters.indices.filter { scatters[$0].contains { gap($0, dot) < 100 } }
             let merged = joined.flatMap { scatters[$0] } + [dot]
             for index in joined.reversed() { scatters.remove(at: index) }

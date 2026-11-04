@@ -15,6 +15,12 @@ public enum TextProcessor {
             // A dash set apart between words, as "shortest-path – SPFA", would be dropped as a lone
             // sign; it joins the words instead.
             .replacingOccurrences(of: #"(?<=[\p{L}\p{N})”"’]) ?\n?([–—]) ?\n?(?=[\p{L}\p{N}(“"‘])"#, with: "$1", options: .regularExpression)
+            // A quote mark PDFKit set apart, as the close of "research taste." before " It's often", goes on its word.
+            .replacingOccurrences(of: #"(?<=[\p{L}\p{N}.!?,;:)])\s+(["”’])(?=\s|$)"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"(?<=^|\s)(["“‘])\s+(?=[\p{L}\p{N}(])"#, with: "$1", options: .regularExpression)
+            // So does a hyphen typed as a dash, as "Ideation - Choose a problem".
+            // Between figures it is a minus, as "(0 - 1)", and stays.
+            .replacingOccurrences(of: #"(?<=\p{L}[)”"’]?) - (?=[(“"‘]?\p{L})"#, with: "–", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }

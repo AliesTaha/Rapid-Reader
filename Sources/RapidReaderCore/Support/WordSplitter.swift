@@ -122,6 +122,39 @@ enum WordSplitter {
 
     private static let joiningWords: Set<String> = ["of", "to", "in", "and", "is", "for", "the", "with", "as"]
 
+    /// A line printed letter by letter, as "O ur g o a l i n th i s b o ok", put back into words:
+    /// neighbouring pieces join where they make a word, longer words counting for more, and
+    /// pieces that make none, as the "H e c h tm a n" of a name, stay one group.
+    static func regrouped(_ pieces: [String]) -> String {
+        guard !pieces.isEmpty else { return "" }
+        func score(_ group: ArraySlice<String>) -> Int {
+            let word = group.joined()
+            let letters = word.filter(\.isLetter)
+            guard !letters.isEmpty else { return -1 }
+            // The spelling service passes any word with a capital inside, as "howTPU"; words are
+            // checked in small letters, and common ones win ties, so "and how" beats "an dhow".
+            let lower = letters.lowercased()
+            let known = letters.count == 1 ? ["a", "A", "I"].contains(letters) : (letters.dropFirst().allSatisfy(\.isLowercase) || letters.allSatisfy(\.isUppercase) && letters.count <= 3) && isWord(lower)
+            return known ? letters.count * letters.count + (commonWords.contains(lower) ? 6 : 0) : -3
+        }
+        var best = [(score: Int, cuts: [Int])?](repeating: nil, count: pieces.count + 1)
+        best[0] = (0, [])
+        for end in 1...pieces.count {
+            for start in max(0, end - 12)..<end {
+                guard let prefix = best[start] else { continue }
+                let candidate = (score: prefix.score + score(pieces[start..<end]), cuts: prefix.cuts + [end])
+                if best[end].map({ candidate.score > $0.score }) ?? true { best[end] = candidate }
+            }
+        }
+        guard let found = best[pieces.count] else { return pieces.joined(separator: " ") }
+        var words: [String] = [], start = 0
+        for cut in found.cuts { words.append(pieces[start..<cut].joined()); start = cut }
+        // Punctuation goes on the word before it, and a sentence after it stands apart.
+        return words.joined(separator: " ")
+            .replacingOccurrences(of: #"\s+([.,;:!?)\]’”])"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"(?<=\p{Ll})([.!?;:,])(?=\p{Lu})"#, with: "$1 ", options: .regularExpression)
+    }
+
     /// Words of machine learning and computing the spelling dictionary lacks; a split that finds
     /// one wins, so "theseshardings" is "these shardings", not "theses hardings".
     private static let technicalWords: Set<String> = Set("""
