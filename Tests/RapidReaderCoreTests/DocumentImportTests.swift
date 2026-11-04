@@ -86,7 +86,7 @@ final class DocumentImportTests: XCTestCase {
         XCTAssertEqual(item.progress.sectionIndex, 0)
         XCTAssertEqual(item.progress.wordIndex, 0)
         XCTAssertEqual(item.preferences.wordsPerMinute, 100)
-        XCTAssertEqual(item.preferences.fontSize, 110)
+        XCTAssertEqual(item.preferences.fontSize, 220)
         XCTAssertEqual(item.preferences.chunkSize, 4)
     }
 

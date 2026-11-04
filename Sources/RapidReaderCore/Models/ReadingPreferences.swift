@@ -32,7 +32,7 @@ public struct ReadingPreferences: Codable, Equatable, Sendable {
         stopOnExpressions: Bool = true,
         checkInMinutes: Int = 4,
         showSectionProgress: Bool = true,
-        rhythmPulse: Bool = true
+        rhythmPulse: Bool = false
     ) {
         self.wordsPerMinute = wordsPerMinute
         self.fontSize = fontSize
@@ -52,7 +52,7 @@ public struct ReadingPreferences: Codable, Equatable, Sendable {
     public func clamped() -> ReadingPreferences {
         var result = self
         result.wordsPerMinute = min(max(wordsPerMinute, 100), 900)
-        result.fontSize = fontSize.isFinite ? min(max(fontSize, 42), 110) : 72
+        result.fontSize = fontSize.isFinite ? min(max(fontSize, 42), 220) : 72
         result.chunkSize = min(max(chunkSize, 1), 4)
         result.rampUpSeconds = rampUpSeconds.isFinite ? min(max(rampUpSeconds, 0), 10) : 0
         result.resumeRewindWords = min(max(resumeRewindWords, 0), 20)
@@ -60,11 +60,13 @@ public struct ReadingPreferences: Codable, Equatable, Sendable {
         return result
     }
 
-    // Long-word pacing became on by default; a new key lets saved documents pick that up.
+    // Long-word pacing became on by default and the word pulse off; new keys let saved
+    // documents pick that up.
     private enum CodingKeys: String, CodingKey {
         case wordsPerMinute, fontSize, chunkSize, showContext, pauseOnPunctuation, focusMode, rampUpSeconds, resumeRewindWords, stopOnExpressions
-        case checkInMinutes, showSectionProgress, rhythmPulse
+        case checkInMinutes, showSectionProgress
         case pauseOnLongWords = "slowOnLongWords"
+        case rhythmPulse = "wordPulse"
     }
 
     public init(from decoder: Decoder) throws {

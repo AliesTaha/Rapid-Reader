@@ -63,7 +63,7 @@ private struct ReadingDefaultsSettings: View {
                         .monospacedDigit()
                 }
                 LabeledContent("Word size") {
-                    Slider(value: $defaultFontSize, in: 42...110) {
+                    Slider(value: $defaultFontSize, in: 42...220) {
                         Text("Word size")
                     } minimumValueLabel: {
                         Image(systemName: "textformat.size.smaller")

@@ -16,7 +16,7 @@ struct ReadingOptionsView: View {
 
                 HStack(spacing: 10) {
                     Image(systemName: "textformat.size.smaller")
-                    Slider(value: $preferences.fontSize, in: 42...110)
+                    Slider(value: $preferences.fontSize, in: 42...220)
                         .accessibilityLabel("Word size")
                     Image(systemName: "textformat.size.larger")
                 }
