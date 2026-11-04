@@ -358,14 +358,24 @@ public enum PDFTextExtractor {
     static func placingFigures(_ sections: [BookSection], figures: [PDFLayoutAnalyzer.PageFigure]) -> [BookSection] {
         var readable: [BookSection] = []
         var carried: [SectionFigure] = []
+        // A section that is only a picture, as a heading over a table, has no words to read; its
+        // title is read before the next section's text, with its picture after it.
+        var heading = ""
         for section in sections {
-            let resolved = PDFLayoutAnalyzer.resolveFigures(in: section.text, figures: figures)
-            let wordCount = TextProcessor.tokenize(resolved.text).count
-            var placed = carried.map { figure in
-                var figure = figure
-                figure.wordIndex = 0
-                return figure
+            var resolved = PDFLayoutAnalyzer.resolveFigures(in: section.text, figures: figures)
+            let lead = TextProcessor.tokenize(heading).count
+            if lead > 0 {
+                resolved.text = heading + "\n" + resolved.text
+                resolved.figures = resolved.figures.map { figure in
+                    var figure = figure
+                    figure.wordIndex += lead
+                    return figure
+                }
+                heading = ""
             }
+            let wordCount = TextProcessor.tokenize(resolved.text).count
+            let earlier = carried.count
+            var placed = carried
             // A figure after the last word, as a display ending a proof, closes its own section.
             placed += resolved.figures.map { figure in
                 var figure = figure
@@ -374,7 +384,29 @@ public enum PDFTextExtractor {
             }
             carried = []
             guard wordCount > 0 else {
-                carried = placed
+                // Its title and picture close the section before, read in their place.
+                let title = section.title.trimmingCharacters(in: .whitespaces)
+                if !placed.isEmpty, var last = readable.popLast(), !title.isEmpty {
+                    last.text += "\n" + title + "."
+                    last.wordCount = TextProcessor.tokenize(last.text).count
+                    last.figures += placed.map { figure in
+                        var figure = figure
+                        figure.wordIndex = last.wordCount
+                        return figure
+                    }
+                    readable.append(last)
+                    continue
+                }
+                // At the start, its picture comes after its title, which leads the next section; a
+                // title with nothing under it, as a part's, is not read.
+                guard !placed.isEmpty, !title.isEmpty else { carried = placed; continue }
+                heading = (heading.isEmpty ? "" : heading + "\n") + title + "."
+                let after = TextProcessor.tokenize(heading).count
+                carried = placed.enumerated().map { offset, figure in
+                    var figure = figure
+                    if offset >= earlier { figure.wordIndex = after }
+                    return figure
+                }
                 continue
             }
             readable.append(BookSection(id: section.id, title: section.title, text: resolved.text, wordCount: wordCount, figures: placed))
@@ -674,7 +706,8 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<![\p{L}])([a-z])loglog([a-z])(?![\p{L}(])"#, with: "$1 log log $2", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<![\p{L}])([a-z])log([a-z])(?![\p{L}(])"#, with: "$1 log $2", options: .regularExpression)
                 .replacingOccurrences(of: #"(?<![\p{L}])([a-z])log(?= [a-z]\b)"#, with: "$1 log", options: .regularExpression)
-                .replacingOccurrences(of: #"(?<![\p{L}])log([a-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
+                // "logs" and "logo" are words.
+                .replacingOccurrences(of: #"(?<![\p{L}])log([a-np-rt-z])(?![\p{L}(])"#, with: "log $1", options: .regularExpression)
                 // A centred ellipsis, as in "X2 + · · · + Xn", is one sign.
                 .replacingOccurrences(of: #"·\s?·\s?·(\s(?=[)\]}]))?"#, with: "⋯", options: .regularExpression)
                 // A power between two names, as the "2ᵏ" of "O(n2ᵏk)", stands apart from them.

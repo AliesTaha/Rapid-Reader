@@ -57,7 +57,8 @@ enum PDFLayoutAnalyzer {
             return (selection, text)
         }
         found = found.flatMap { splittingAtSizeChange($0, on: page) }
-        respaceRunTogetherLines(&found, on: page, bounds: pageBounds)
+        // A web page stores its spaces; only PDFs that position words without them are respaced.
+        if !printedFromWeb(page) { respaceRunTogetherLines(&found, on: page, bounds: pageBounds) }
         let pageInk = InkMap(page: page, bounds: pageBounds)
         if let pageInk { found = visibleLines(found, on: page, ink: pageInk) }
         found = splittingAtJoiningWords(found, on: page)
@@ -87,8 +88,15 @@ enum PDFLayoutAnalyzer {
             for piece in found {
                 if let last = joined.last {
                     let a = last.selection.bounds(for: page), b = piece.selection.bounds(for: page)
-                    if abs(a.midY - b.midY) < min(a.height, b.height) * 0.3, b.minX - a.maxX >= -0.5, b.minX - a.maxX < 0.5,
-                       last.text.last.map({ !$0.isWhitespace && $0 != "," && $0 != "." }) == true, piece.text.first?.isWhitespace == false {
+                    // The page's own text decides: a space between the pieces, as in "81,920" + "tokens", stays.
+                    let first = last.selection.range(at: last.selection.numberOfTextRanges(on: page) - 1, on: page), second = piece.selection.range(at: 0, on: page)
+                    let between = first.location != NSNotFound && second.location != NSNotFound && second.location >= NSMaxRange(first)
+                        ? ((page.string ?? "") as NSString).substring(with: NSRange(location: NSMaxRange(first), length: min(4, second.location - NSMaxRange(first)))) : " "
+                    if abs(a.midY - b.midY) < min(a.height, b.height) * 0.3, b.minX - a.maxX >= -0.5, b.minX - a.maxX < 0.5, !between.contains(" "),
+                       // Only an identifier broken at a joint, as "<end_" + "of_", where no word could end.
+                       // or a footnote's mark set against its word, as "conferences" + "[2]".
+                       last.text.last.map({ "_/<([".contains($0) }) == true || piece.text.first.map({ "_>)]".contains($0) }) == true
+                        || piece.text.range(of: #"^\[\d{1,3}\]"#, options: .regularExpression) != nil {
                         last.selection.add(piece.selection)
                         joined[joined.count - 1].text = last.text + piece.text
                         continue
@@ -170,6 +178,7 @@ enum PDFLayoutAnalyzer {
             // dictionary finds the words again.
             let pieces = printed.split(whereSeparator: \.isWhitespace)
             let respaced = webPage && pieces.count >= 8 && !printed.contains("://") && pieces.filter({ $0.count <= 2 && $0.allSatisfy(\.isLetter) }).count * 2 >= pieces.count
+                && pieces.filter({ $0.count == 1 && $0.allSatisfy(\.isLetter) && !["a", "A", "I"].contains(String($0)) }).count >= 3
                 ? WordSplitter.regrouped(pieces.map(String.init)) : printed
             // Table-of-contents entries end in dot leaders and are prose, whatever else they hold.
             let leaders = respaced.range(of: #"(\. ?){4,}"#, options: .regularExpression) != nil
@@ -225,6 +234,21 @@ enum PDFLayoutAnalyzer {
                 lines[index].heading = !continued && named && (1...(web ? 24 : 8)).contains(words.count) && words.contains(where: { isWord($0) || $0.filter(\.isLetter).count >= 2 && $0.filter(\.isLetter).allSatisfy(\.isUppercase) })
                     && lines[index].text.range(of: #"[.,;:]$"#, options: .regularExpression) == nil
                 if lines[index].heading { lines[index].kind = nil }
+            }
+            // A web page's heading can start with a mark PDFKit set apart on its row, as the "B ·" of
+            // "B · MOPD from the Adam experts"; the heading starts there.
+            if web {
+                for index in lines.indices.dropFirst() where lines[index].heading {
+                    var before = index - 1
+                    while before >= 0, !lines[before].heading, !lines[before].text.isEmpty, lines[before].text.count <= 4,
+                          abs(lines[before].bounds.midY - lines[index].bounds.midY) < lines[index].bounds.height * 0.4,
+                          lines[before].bounds.maxX <= lines[index].bounds.minX + 1, lines[index].bounds.minX - lines[before].bounds.maxX < 20 {
+                        lines[index].text = lines[before].text + " " + lines[index].text
+                        lines[index].bounds = lines[index].bounds.union(lines[before].bounds)
+                        lines[before].text = ""
+                        before -= 1
+                    }
+                }
             }
             // A web page's heading wrapped over two lines, as "Do all four runs follow the experts'" +
             // "Math curriculum?", is one title.
@@ -3946,6 +3970,10 @@ enum PDFLayoutAnalyzer {
                     guard abs(rule.minX - last.minX) <= 3, abs(rule.maxX - last.maxX) <= 3 else { continue }
                     // Cells can hold a paragraph; a line across the whole width between two rules, as
                     // prose between section rules, is no row.
+                    // Two tables one under the other, or with a heading between them, are two tables: a
+                    // table's rows each hold text, and none is a heading.
+                    let band = lines.filter { !$0.text.isEmpty && $0.bounds.midY < last.minY && $0.bounds.midY > rule.maxY && $0.bounds.maxX > rule.minX && $0.bounds.minX < rule.maxX }
+                    guard !band.isEmpty, !band.contains(where: \.heading) else { break }
                     guard last.midY - rule.midY <= lineHeight * 16, !lines.contains(where: { line in
                         !line.text.isEmpty && line.bounds.midY < last.minY && line.bounds.midY > rule.maxY && line.bounds.width >= rule.width * 0.85
                             && ink.gutters(in: line.bounds.insetBy(dx: 2, dy: 1), skipping: [], atLeast: 6).isEmpty
@@ -3968,7 +3996,7 @@ enum PDFLayoutAnalyzer {
                 // A header row can stand over the first rule, inside its width, set in the same
                 // columns; the sentence leading into the table runs across them.
                 let header = lines.indices.filter { lines[$0].bounds.midY > top.maxY && lines[$0].bounds.minY - top.maxY < lineHeight
-                    && lines[$0].bounds.minX >= top.minX - 2 && lines[$0].bounds.maxX <= top.maxX + 2 && !lines[$0].text.isEmpty }
+                    && lines[$0].bounds.minX >= top.minX - 2 && lines[$0].bounds.maxX <= top.maxX + 2 && !lines[$0].text.isEmpty && !lines[$0].heading }
                 // The lead-in ends its sentence, as "Paired on the same 4,200 validation rows:"; a header does not.
                 if !header.isEmpty, !header.contains(where: { lines[$0].text.trimmingCharacters(in: .whitespaces).range(of: #"[.:;]$"#, options: .regularExpression) != nil }),
                    !lines.contains(where: { line in
@@ -5407,7 +5435,8 @@ private struct InkMap {
                 // One pixel thick, or two with the next row as dark.
                 let thick = mean(row + 1, span) <= here + 8
                 let below = mean(row + (thick ? 2 : 1), span), above = mean(row - 1, span)
-                guard here + 8 <= above, here + 8 <= below else { continue }
+                // A rule beside a shaded row, as a table's border over its header, stands out on its white side only.
+                guard here + 8 <= max(above, below), here <= min(above, below) + 1 else { continue }
                 let rule = CGRect(x: bounds.minX + CGFloat(start), y: bounds.maxY - CGFloat(row + (thick ? 2 : 1)), width: CGFloat(end - start), height: thick ? 2 : 1)
                 if !rules.contains(where: { $0.insetBy(dx: 0, dy: -1).intersects(rule) }) { rules.append(rule) }
             }
