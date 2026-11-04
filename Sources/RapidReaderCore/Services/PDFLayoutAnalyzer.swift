@@ -81,6 +81,23 @@ enum PDFLayoutAnalyzer {
             }
             found = found.indices.sorted { (rows[$0], centres[$0].minX) < (rows[$1], centres[$1].minX) }.map { found[$0] }
         }
+        // Pieces of a web page's word that touch, as "<end_" + "of_" + "turn>", are one word.
+        if printedFromWeb(page) {
+            var joined: [(selection: PDFSelection, text: String)] = []
+            for piece in found {
+                if let last = joined.last {
+                    let a = last.selection.bounds(for: page), b = piece.selection.bounds(for: page)
+                    if abs(a.midY - b.midY) < min(a.height, b.height) * 0.3, b.minX - a.maxX >= -0.5, b.minX - a.maxX < 0.5,
+                       last.text.last.map({ !$0.isWhitespace && $0 != "," && $0 != "." }) == true, piece.text.first?.isWhitespace == false {
+                        last.selection.add(piece.selection)
+                        joined[joined.count - 1].text = last.text + piece.text
+                        continue
+                    }
+                }
+                joined.append(piece)
+            }
+            found = joined
+        }
         // A run-in heading, as "Acknowledgements" before "We are grateful to …", can come before
         // the next row in PDFKit's order, with the rest of its own row after that.
         if found.count >= 3 {

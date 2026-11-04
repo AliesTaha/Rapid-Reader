@@ -666,7 +666,8 @@ public enum PDFTextExtractor {
                 .replacingOccurrences(of: #"(?<=[:,])¬"#, with: " ¬", options: .regularExpression)
                 // An operator PDFKit set against the term before it, as "AB= C", "k− a" or "10⊕ 12",
                 // stands apart from both sides as typeset.
-                .replacingOccurrences(of: #"(?<=[\p{L}\p{N})\]}′])([=≤≥≠<>⊕×+−≈≡])(?= )"#, with: " $1", options: .regularExpression)
+                // A count with a plus after it, as "20+ papers", keeps it, and a tag keeps its closing bracket, as "<end_of_turn>".
+                .replacingOccurrences(of: #"(?<=[\p{L}\p{N})\]}′])([=≤≥≠<⊕×−≈≡]|(?<!<[\w]{1,30})>|(?<!\d)\+|\+(?! \p{L}{3}))(?= )"#, with: " $1", options: .regularExpression)
                 // A function's name keeps its argument: "f (n)" is "f(n)".
                 .replacingOccurrences(of: #"(?<![\p{L}\p{N}])([fgh]) \("#, with: "$1(", options: .regularExpression)
                 // "O(logn)" and "O(mlogm)" read "O(log n)" and "O(m log m)".
