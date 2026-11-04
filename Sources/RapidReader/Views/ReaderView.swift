@@ -511,15 +511,13 @@ private struct Beat: Equatable {
 }
 
 private extension View {
-    /// Lights up on each new beat with a brief glow and settles back to its normal colour, so
-    /// the eye has a rhythm to follow. Size never changes, so letters keep their spacing.
+    /// Brightens on each new beat and settles back to its normal colour, so the eye has a
+    /// rhythm to follow. Size never changes, so letters keep their spacing.
     @ViewBuilder
     func pulse(on beat: Beat?) -> some View {
         if let beat {
-            keyframeAnimator(initialValue: 0.0, trigger: beat.index) { content, glow in
-                content
-                    .brightness(0.18 * glow)
-                    .shadow(color: Color.readerAmber.opacity(0.85 * glow), radius: 9 * glow)
+            keyframeAnimator(initialValue: 0.0, trigger: beat.index) { content, flash in
+                content.brightness(0.18 * flash)
             } keyframes: { _ in
                 CubicKeyframe(1.0, duration: beat.duration * 0.2)
                 CubicKeyframe(0.0, duration: beat.duration * 0.8)
