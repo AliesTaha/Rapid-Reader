@@ -1145,6 +1145,9 @@ enum PDFLayoutAnalyzer {
                 // Braces stretch a box as far as its line's, as on "if coins = {1,3,4}".
                 if chain == nil, apart || fromWeb, fromWeb || rect.height <= max(usualHeight * 1.35, lines[index].bounds.height + 0.5), fromWeb || isPlainMath(whole),
                    let ink = inlineInk, fromWeb ? ordinaryText(whole) || writtenOnOneRow(rect, on: page, ink: ink) : isOneRow(rect, on: page, ink: ink) { continue }
+                // Code or plain figures set in a sentence, as "len(jax.devices()) == 8" or "/ 4.59E+14 = 435",
+                // are ordinary characters on one row whatever font sets them: they read as written.
+                if chain == nil, !fromWeb, writtenCode(whole), let ink = inlineInk, isOneRow(rect, on: page, ink: ink) { continue }
                 // Nor cuts a glyph at its top or foot, as the exponent of "84⁶": it grows to the first
                 // blank row, a little way at most.
                 var erase: [CGRect] = []
@@ -2589,6 +2592,18 @@ enum PDFLayoutAnalyzer {
             scalar.value < 0x250 || (0x2000...0x206F).contains(scalar.value) || (0x2190...0x21FF).contains(scalar.value)
                 || "−±×÷≈≠≤≥∼·…".unicodeScalars.contains(scalar)
         }
+    }
+
+    /// Code or figures a sentence sets inline, which read as written: a call or an index by name, as
+    /// "len(jax.devices()) == 8" or "Win[D, FY] = AllGatherX(…)", or figures and signs alone, as
+    /// "/ 4.59E+14 = 435"; nothing an index or exponent was written into, nor any Greek or ≠.
+    fileprivate static func writtenCode(_ text: String) -> Bool {
+        guard text.unicodeScalars.allSatisfy({ $0.value < 0x80 || "−×·…".unicodeScalars.contains($0) }), !text.contains("_ "),
+              text.contains(where: { $0.isLetter || $0.isNumber }) else { return false }
+        let named = text.range(of: #"[A-Za-z][A-Za-z0-9_.]{1,}[(\[]"#, options: .regularExpression) != nil
+        let figures = text.replacingOccurrences(of: #"\d+(\.\d+)?[eE][+−-]?\d+|\b(ms|us|ns|s|GB|MB|kB|TB|GiB|MiB|FLOPs?|bytes?)\b"#, with: "1", options: .regularExpression)
+            .allSatisfy { $0.isNumber || " .,+−-*/=()<>×·%".contains($0) }
+        return named || figures
     }
 
     /// On a web page, ink that is a glyph or two, as a lone "(" or "≈", or that lies on one row.
