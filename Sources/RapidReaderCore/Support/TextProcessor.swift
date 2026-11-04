@@ -276,10 +276,10 @@ public struct RSVPWord: Equatable, Sendable {
         )
     }
 
-    /// Words longer than six letters stay on screen 10% longer per extra letter, up to 2.2×.
+    /// Words longer than six letters stay on screen 20% longer per extra letter, up to 3.4×.
     public var lengthDelayMultiplier: Double {
         let letters = raw.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count
-        return 1 + min(1.2, Double(max(0, letters - 6)) * 0.1)
+        return 1 + min(2.4, Double(max(0, letters - 6)) * 0.2)
     }
 
     /// Ends with a full stop, question mark or exclamation mark, ignoring closing quotes and brackets.
